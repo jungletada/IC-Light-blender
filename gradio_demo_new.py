@@ -358,7 +358,7 @@ def process_relight(input_fg, prompt, image_width, image_height, num_samples, se
             a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source)
     
     mask = alpha_rgb / 255.
-    utils.cv2_save_rgb(osp.join('results','mask.png'), alpha_rgb) 
+    # utils.cv2_save_rgb(osp.join('results','mask.png'), alpha_rgb) 
     utils.cv2_save_rgb(osp.join('results','fg_image.jpg'), resized_fg)
     blend_results = utils.blend_ic_light(mask, resized_fg, results, threshold=blend_value)
     return alpha_rgb, blend_results
@@ -409,7 +409,7 @@ with block:
             with gr.Row():
                 input_fg = gr.Image(source='upload', type="numpy", label="Image", height=480)
                 output_bg = gr.Image(type="numpy", label="Preprocessed Foreground", height=480)
-            prompt = gr.Textbox(label="Prompt")
+            prompt = gr.Textbox(label="Prompt/提示词")
             bg_source = gr.Radio(choices=[e.value for e in BGSource],
                                  value=BGSource.NONE.value,
                                  label="Lighting Preference (Initial Latent)", type='value')

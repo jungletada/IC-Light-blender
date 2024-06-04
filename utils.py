@@ -20,22 +20,15 @@ def cv2_load_rgb(path):
 def blend_ic_light(mask, resized_fg, ic_fg_results, threshold):
     blended_ic_results = []
     for i, ic_fg in enumerate(ic_fg_results):
-        # diff = np.abs(ic_fg - resized_fg) * mask
-        # sum_diff = np.sum(diff, axis=2).astype(np.uint8)
-        # max_sum_diff = np.max(sum_diff) # 计算最大 sum_diff，用于归一化
-        # if max_sum_diff == 0:
-        #     max_sum_diff = 1
-        assert 0 <= threshold <= 1
-        diff = (ic_fg - resized_fg) * mask
-        weight_ic_fg = (diff - np.min(diff, axis=(0,1))) / ((np.max(diff, axis=(0,1)) - np.min(diff, axis=(0,1))) + 1e-6)
-        # weight_ic_fg = sum_diff / max_sum_diff
+
+        diff = (ic_fg - resized_fg) * mask.astype(np.uint8)
+        min_diff, max_diff = np.min(diff, axis=(0,1)), np.max(diff, axis=(0,1))
+        weight_ic_fg = (diff - min_diff) / (max_diff - min_diff + 1e-6)
         weight_ic_fg[weight_ic_fg > threshold] = threshold
         weight_resized_fg = 1 - weight_ic_fg
-        # # 扩展权重以适应图像的形状
-        # weight_ic_fg = weight_ic_fg[..., np.newaxis]
-        # weight_resized_fg = weight_resized_fg[..., np.newaxis]
+        
         # 计算混合后的图像
-        blended = (ic_fg * weight_ic_fg + resized_fg * weight_resized_fg)
+        blended = (ic_fg * weight_ic_fg + resized_fg * weight_resized_fg).astype(np.uint8)
         ic_fg[mask==1] = blended[mask==1]
         blended_ic_results.append(ic_fg)
         cv2_save_rgb(f'results/blend_{i}.jpg', ic_fg.astype(np.uint8))
