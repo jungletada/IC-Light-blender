@@ -17,6 +17,51 @@ def cv2_load_rgb(path):
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
+def cv2_resize_img_aspect(img, max_size=1024, pad_to_64=True):
+    h, w = img.shape[:2]
+    if max(h, w) > max_size:
+        if h > w:
+            new_h = max_size
+            new_w = int(w * (max_size / h))
+        else:
+            new_w = max_size
+            new_h = int(h * (max_size / w))
+        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        
+    if pad_to_64:
+        h, w = img.shape[:2]
+        new_h = ((h + 63) // 64) * 64
+        new_w = ((w + 63) // 64) * 64
+        pad_h = new_h - h
+        pad_w = new_w - w
+
+        top = pad_h // 2
+        bottom = pad_h - top
+        left = pad_w // 2
+        right = pad_w - left
+        img = cv2.copyMakeBorder(
+            img, top, bottom, left, right, cv2.BORDER_REFLECT)
+        
+    return img
+
+
+def cv2_resize_img(img, new_w, new_h):
+    img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    return img
+    
+    
+def cv2_erode_image(mask, beta=2):
+    C = mask.shape[-1]
+    kernel = np.ones((beta, beta), np.uint8) # 创建腐蚀操作的核，大小为 (beta, beta)
+    if C == 3:
+        gray_mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+        eroded_gray_mask = cv2.erode(gray_mask, kernel, iterations=1)
+        eroded_mask = cv2.cvtColor(eroded_gray_mask, cv2.COLOR_GRAY2BGR)
+    else:
+        eroded_mask = cv2.erode(mask, kernel, iterations=1) # 进行腐蚀操作
+    return eroded_mask
+    
+
 def blend_ic_light(mask, resized_fg, ic_fg_results, threshold):
     blended_ic_results = []
     for i, ic_fg in enumerate(ic_fg_results):

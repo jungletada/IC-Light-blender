@@ -214,7 +214,7 @@ def resize_without_crop(image, target_width, target_height):
     resized_image = pil_image.resize((target_width, target_height), Image.LANCZOS)
     return np.array(resized_image)
 
-    
+
 @torch.inference_mode()
 def run_rmbg(img, sigma=0.0):
     """
@@ -235,12 +235,23 @@ def run_rmbg(img, sigma=0.0):
     return result, alpha
 
 
+def run_process_alpha(img, mask, sigma=0.0):
+    result = 127 + (img.astype(np.float32) - 127 + sigma) * mask
+    result = result.clip(0, 255).astype(np.uint8) # result背景部分变成灰色
+    return result
+
+
 @torch.inference_mode()
-def process(input_fg, alpha, prompt, image_width, image_height, num_samples, seed, steps, 
+def process(input_fg, mask, prompt, i_width, i_height, num_samples, seed, steps, 
             a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source):
+    
+    fg = utils.cv2_resize_img_aspect(input_fg)
+    mask = utils.cv2_resize_img_aspect(mask)
+    print(f"After resize_img_with_padding: {fg.shape}")
+    image_height, image_width = fg.shape[:2]
+    
     bg_source = BGSource(bg_source)
     input_bg = None
-
     if bg_source == BGSource.NONE:
         pass
     elif bg_source == BGSource.LEFT:
@@ -263,12 +274,8 @@ def process(input_fg, alpha, prompt, image_width, image_height, num_samples, see
         raise 'Wrong initial latent!'
 
     rng = torch.Generator(device=device).manual_seed(int(seed))
-
-    alpha_binary = (alpha > 0.5).astype(np.uint8)
-    alpha_rgb = (alpha_binary.repeat(3, axis=2) * 255).astype(np.uint8)
     
-    fg = resize_and_center_crop(input_fg, image_width, image_height)
-    alpha_rgb = resize_and_center_crop(alpha_rgb, image_width, image_height)
+    # fg = resize_and_center_crop(input_fg, image_width, image_height) # 512 * 512
     
     concat_conds = numpy2pytorch([fg]).to(device=vae.device, dtype=vae.dtype)
     concat_conds = vae.encode(concat_conds).latent_dist.mode() * vae.config.scaling_factor
@@ -276,6 +283,7 @@ def process(input_fg, alpha, prompt, image_width, image_height, num_samples, see
     conds, unconds = encode_prompt_pair(positive_prompt=prompt + ', ' + a_prompt, negative_prompt=n_prompt)
 
     if input_bg is None:
+        print(f"use t2i.............")
         latents = t2i_pipe(
             prompt_embeds=conds,
             negative_prompt_embeds=unconds,
@@ -289,7 +297,8 @@ def process(input_fg, alpha, prompt, image_width, image_height, num_samples, see
             cross_attention_kwargs={'concat_conds': concat_conds},
         ).images.to(vae.dtype) / vae.config.scaling_factor
     else:
-        bg = resize_and_center_crop(input_bg, image_width, image_height)
+        # bg = resize_and_center_crop(input_bg, image_width, image_height)
+        bg = utils.cv2_resize_img_aspect(input_bg)
         bg_latent = numpy2pytorch([bg]).to(device=vae.device, dtype=vae.dtype)
         bg_latent = vae.encode(bg_latent).latent_dist.mode() * vae.config.scaling_factor
         latents = i2i_pipe(
@@ -306,25 +315,34 @@ def process(input_fg, alpha, prompt, image_width, image_height, num_samples, see
             guidance_scale=cfg,
             cross_attention_kwargs={'concat_conds': concat_conds},
         ).images.to(vae.dtype) / vae.config.scaling_factor
-
-    pixels = vae.decode(latents).sample
+    
+    # vae decode
+    pixels = vae.decode(latents).sample 
     pixels = pytorch2numpy(pixels)
+    rw, rh = int(round(image_width * highres_scale / 64.0) * 64), int(round(image_height * highres_scale / 64.0) * 64)
     pixels = [resize_without_crop(
         image=p,
-        target_width=int(round(image_width * highres_scale / 64.0) * 64),
-        target_height=int(round(image_height * highres_scale / 64.0) * 64))
+        target_width=rw,
+        target_height=rh)
     for p in pixels]
-    alpha_rgb = resize_without_crop(alpha_rgb, 
-        target_width=int(round(image_width * highres_scale / 64.0) * 64),
-        target_height=int(round(image_height * highres_scale / 64.0) * 64))
+    
+    print(f"After resize_without_crop: {pixels[0].shape}") # 768 * 768
+    utils.cv2_save_rgb('results/pixel_bg.jpg', pixels[0])
+    
+    mask = resize_without_crop(
+        mask, 
+        target_width=rw,
+        target_height=rh)
     
     pixels = numpy2pytorch(pixels).to(device=vae.device, dtype=vae.dtype)
     latents = vae.encode(pixels).latent_dist.mode() * vae.config.scaling_factor
     latents = latents.to(device=unet.device, dtype=unet.dtype)
 
     image_height, image_width = latents.shape[2] * 8, latents.shape[3] * 8
-
-    fg = resize_and_center_crop(input_fg, image_width, image_height)
+    # fg = resize_and_center_crop(input_fg, image_width, image_height)  # 768 * 768
+    fg = utils.cv2_resize_img(fg, image_width, image_height)
+    print(f"After latent cv2_resize_img: {fg.shape}")
+    
     concat_conds = numpy2pytorch([fg]).to(device=vae.device, dtype=vae.dtype)
     concat_conds = vae.encode(concat_conds).latent_dist.mode() * vae.config.scaling_factor
 
@@ -345,23 +363,26 @@ def process(input_fg, alpha, prompt, image_width, image_height, num_samples, see
 
     pixels = vae.decode(latents).sample
 
-    return pytorch2numpy(pixels), alpha_rgb, fg
+    return pytorch2numpy(pixels), mask, fg
 
 
 @torch.inference_mode()
-def process_relight(input_fg, prompt, image_width, image_height, num_samples, seed, steps, 
+def process_relight(input_fg, mask, prompt, image_width, image_height, num_samples, seed, steps, 
                     a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source, blend_value):
     
-    input_fg, alpha = run_rmbg(input_fg) # H, W
-    results, alpha_rgb, resized_fg = process(
-        input_fg, alpha, prompt, image_width, image_height, num_samples, seed, steps, 
-            a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source)
+    # input_fg, alpha = run_rmbg(input_fg) # H, W
+    mask = utils.cv2_erode_image(mask, beta=2)
+    mask = (mask / 255.).astype(np.uint8) # convert to  [0, 1] mask map
+    fuse_fg = run_process_alpha(input_fg, mask, sigma=0.0)
     
-    mask = alpha_rgb / 255.
+    results, mask, fg = process(
+        fuse_fg, mask, prompt, image_width, image_height, num_samples, seed, steps, 
+            a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source)
+    mask = mask.astype(np.uint8)
     # utils.cv2_save_rgb(osp.join('results','mask.png'), alpha_rgb) 
-    utils.cv2_save_rgb(osp.join('results','fg_image.jpg'), resized_fg)
-    blend_results = utils.blend_ic_light(mask, resized_fg, results, threshold=blend_value)
-    return alpha_rgb, blend_results
+    blend_results = utils.blend_ic_light(mask, fg, results, threshold=blend_value)
+    utils.cv2_save_rgb(osp.join('results','fg.jpg'), fg)
+    return blend_results
 
 
 quick_prompts = [
@@ -408,7 +429,7 @@ with block:
         with gr.Column():
             with gr.Row():
                 input_fg = gr.Image(source='upload', type="numpy", label="Image", height=480)
-                output_bg = gr.Image(type="numpy", label="Preprocessed Foreground", height=480)
+                mask = gr.Image(source='upload', type="numpy", label="Mask Input", height=480)
             prompt = gr.Textbox(label="Prompt/提示词")
             bg_source = gr.Radio(choices=[e.value for e in BGSource],
                                  value=BGSource.NONE.value,
@@ -436,20 +457,20 @@ with block:
                 n_prompt = gr.Textbox(label="Negative Prompt", value='lowres, bad anatomy, bad hands, cropped, worst quality')
         with gr.Column():
             result_gallery = gr.Gallery(height=832, object_fit='contain', label='Outputs')
-    with gr.Row():
-        dummy_image_for_outputs = gr.Image(visible=False, label='Result')
-        gr.Examples(
-            fn=lambda *args: ([args[-1]], None),
-            examples=db_examples.foreground_conditioned_examples,
-            inputs=[
-                input_fg, prompt, bg_source, image_width, image_height, seed, dummy_image_for_outputs
-            ],
-            outputs=[result_gallery, output_bg],
-            run_on_click=True, examples_per_page=1024
-        )
-    ips = [input_fg, prompt, image_width, image_height, num_samples, seed, steps, 
+    # with gr.Row():
+    #     dummy_image_for_outputs = gr.Image(visible=False, label='Result')
+    #     gr.Examples(
+    #         fn=lambda *args: ([args[-1]], None),
+    #         examples=db_examples.foreground_conditioned_examples,
+    #         inputs=[
+    #             input_fg, prompt, bg_source, image_width, image_height, seed, dummy_image_for_outputs
+    #         ],
+    #         outputs=[result_gallery, output_bg],
+    #         run_on_click=True, examples_per_page=1024
+    #     )
+    ips = [input_fg, mask, prompt, image_width, image_height, num_samples, seed, steps, 
            a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source, blend_value]
-    relight_button.click(fn=process_relight, inputs=ips, outputs=[output_bg, result_gallery])
+    relight_button.click(fn=process_relight, inputs=ips, outputs=[result_gallery])
     example_quick_prompts.click(lambda x, y: ', '.join(y.split(', ')[:2] + [x[0]]), inputs=[example_quick_prompts, prompt], 
                                 outputs=prompt, show_progress=False, queue=False)
     example_quick_subjects.click(lambda x: x[0], inputs=example_quick_subjects, outputs=prompt, show_progress=False, queue=False)
