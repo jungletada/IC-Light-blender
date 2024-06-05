@@ -371,7 +371,7 @@ def process_relight(input_fg, mask, prompt, image_width, image_height, num_sampl
                     a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source, blend_value):
     
     # input_fg, alpha = run_rmbg(input_fg) # H, W
-    mask = utils.cv2_erode_image(mask, beta=2)
+    mask = utils.cv2_erode_image(mask, beta=4)
     mask = (mask / 255.).astype(np.uint8) # convert to  [0, 1] mask map
     fuse_fg = run_process_alpha(input_fg, mask, sigma=0.0)
     
