@@ -1,7 +1,9 @@
 import os
+import cv2
 import math
 import gradio as gr
 import numpy as np
+import os.path as osp
 import torch
 import safetensors.torch as sf
 import db_examples
@@ -14,10 +16,9 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from briarmbg import BriaRMBG
 from enum import Enum
 from torch.hub import download_url_to_file
+import utils
 
 
-# 'stablediffusionapi/realistic-vision-v51'
-# 'runwayml/stable-diffusion-v1-5'
 sd15_name = 'stablediffusionapi/realistic-vision-v51'
 tokenizer = CLIPTokenizer.from_pretrained(sd15_name, subfolder="tokenizer")
 text_encoder = CLIPTextModel.from_pretrained(sd15_name, subfolder="text_encoder")
@@ -26,9 +27,8 @@ unet = UNet2DConditionModel.from_pretrained(sd15_name, subfolder="unet")
 rmbg = BriaRMBG.from_pretrained("briaai/RMBG-1.4")
 
 # Change UNet
-
 with torch.no_grad():
-    new_conv_in = torch.nn.Conv2d(12, unet.conv_in.out_channels, unet.conv_in.kernel_size, unet.conv_in.stride, unet.conv_in.padding)
+    new_conv_in = torch.nn.Conv2d(8, unet.conv_in.out_channels, unet.conv_in.kernel_size, unet.conv_in.stride, unet.conv_in.padding)
     new_conv_in.weight.zero_()
     new_conv_in.weight[:, :4, :, :].copy_(unet.conv_in.weight)
     new_conv_in.bias = unet.conv_in.bias
@@ -48,10 +48,10 @@ def hooked_unet_forward(sample, timestep, encoder_hidden_states, **kwargs):
 unet.forward = hooked_unet_forward
 
 # Load
-model_path = './models/iclight_sd15_fbc.safetensors'
+model_path = './models/iclight_sd15_fc.safetensors'
 
 if not os.path.exists(model_path):
-    download_url_to_file(url='https://huggingface.co/lllyasviel/ic-light/resolve/main/iclight_sd15_fbc.safetensors', dst=model_path)
+    download_url_to_file(url='https://huggingface.co/lllyasviel/ic-light/blob/main/iclight_sd15_fc.safetensors', dst=model_path)
 
 sd_offset = sf.load_file(model_path)
 sd_origin = unet.state_dict()
@@ -61,6 +61,7 @@ unet.load_state_dict(sd_merged, strict=True)
 del sd_offset, sd_origin, sd_merged, keys
 
 # Device
+
 device = torch.device('cuda')
 text_encoder = text_encoder.to(device=device, dtype=torch.float16)
 vae = vae.to(device=device, dtype=torch.bfloat16)
@@ -68,10 +69,12 @@ unet = unet.to(device=device, dtype=torch.float16)
 rmbg = rmbg.to(device=device, dtype=torch.float32)
 
 # SDP
+
 unet.set_attn_processor(AttnProcessor2_0())
 vae.set_attn_processor(AttnProcessor2_0())
 
 # Samplers
+
 ddim_scheduler = DDIMScheduler(
     num_train_timesteps=1000,
     beta_start=0.00085,
@@ -99,6 +102,7 @@ dpmpp_2m_sde_karras_scheduler = DPMSolverMultistepScheduler(
 )
 
 # Pipelines
+
 t2i_pipe = StableDiffusionPipeline(
     vae=vae,
     text_encoder=text_encoder,
@@ -213,6 +217,10 @@ def resize_without_crop(image, target_width, target_height):
 
 @torch.inference_mode()
 def run_rmbg(img, sigma=0.0):
+    """
+        alpha: mask type with (H, W, 1) in mumpy
+        result: with (H, W, 3) in mumpy
+    """
     H, W, C = img.shape
     assert C == 3
     k = (256.0 / float(H * W)) ** 0.5
@@ -222,80 +230,107 @@ def run_rmbg(img, sigma=0.0):
     alpha = torch.nn.functional.interpolate(alpha, size=(H, W), mode="bilinear")
     alpha = alpha.movedim(1, -1)[0]
     alpha = alpha.detach().float().cpu().numpy().clip(0, 1)
+    alpha[alpha < 0.97] = 0
+    alpha[alpha >= 0.97] = 1
     result = 127 + (img.astype(np.float32) - 127 + sigma) * alpha
-    return result.clip(0, 255).astype(np.uint8), alpha
+    result = result.clip(0, 255).astype(np.uint8) # result背景部分变成灰色
+    return result, alpha
+
+
+def run_process_alpha(img, mask, sigma=0.0):
+    result = 127 + (img.astype(np.float32) - 127 + sigma) * mask
+    result = result.clip(0, 255).astype(np.uint8) # result背景部分变成灰色
+    return result
 
 
 @torch.inference_mode()
-def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source):
+def process(input_fg, mask, prompt, num_samples, seed, steps, 
+            a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source):
+    fg = utils.cv2_resize_img_aspect(input_fg)
+    mask = utils.cv2_resize_img_aspect(mask)
+    fg = input_fg
+    image_height, image_width = fg.shape[:2]
+    
     bg_source = BGSource(bg_source)
-
-    if bg_source == BGSource.UPLOAD:
+    input_bg = None
+    if bg_source == BGSource.NONE:
         pass
-    elif bg_source == BGSource.UPLOAD_FLIP:
-        input_bg = np.fliplr(input_bg)
-    elif bg_source == BGSource.GREY:
-        input_bg = np.zeros(shape=(image_height, image_width, 3), dtype=np.uint8) + 64
     elif bg_source == BGSource.LEFT:
-        gradient = np.linspace(224, 32, image_width)
+        gradient = np.linspace(255, 0, image_width)
         image = np.tile(gradient, (image_height, 1))
         input_bg = np.stack((image,) * 3, axis=-1).astype(np.uint8)
     elif bg_source == BGSource.RIGHT:
-        gradient = np.linspace(32, 224, image_width)
+        gradient = np.linspace(0, 255, image_width)
         image = np.tile(gradient, (image_height, 1))
         input_bg = np.stack((image,) * 3, axis=-1).astype(np.uint8)
     elif bg_source == BGSource.TOP:
-        gradient = np.linspace(224, 32, image_height)[:, None]
+        gradient = np.linspace(255, 0, image_height)[:, None]
         image = np.tile(gradient, (1, image_width))
         input_bg = np.stack((image,) * 3, axis=-1).astype(np.uint8)
     elif bg_source == BGSource.BOTTOM:
-        gradient = np.linspace(32, 224, image_height)[:, None]
+        gradient = np.linspace(0, 255, image_height)[:, None]
         image = np.tile(gradient, (1, image_width))
         input_bg = np.stack((image,) * 3, axis=-1).astype(np.uint8)
     else:
-        raise 'Wrong background source!'
+        raise 'Wrong initial latent!'
 
-    rng = torch.Generator(device=device).manual_seed(seed)
-
-    fg = resize_and_center_crop(input_fg, image_width, image_height)
-    bg = resize_and_center_crop(input_bg, image_width, image_height)
-    concat_conds = numpy2pytorch([fg, bg]).to(device=vae.device, dtype=vae.dtype)
+    rng = torch.Generator(device=device).manual_seed(int(seed))
+    concat_conds = numpy2pytorch([fg]).to(device=vae.device, dtype=vae.dtype)
     concat_conds = vae.encode(concat_conds).latent_dist.mode() * vae.config.scaling_factor
-    concat_conds = torch.cat([c[None, ...] for c in concat_conds], dim=1)
 
     conds, unconds = encode_prompt_pair(positive_prompt=prompt + ', ' + a_prompt, negative_prompt=n_prompt)
 
-    latents = t2i_pipe(
-        prompt_embeds=conds,
-        negative_prompt_embeds=unconds,
-        width=image_width,
-        height=image_height,
-        num_inference_steps=steps,
-        num_images_per_prompt=num_samples,
-        generator=rng,
-        output_type='latent',
-        guidance_scale=cfg,
-        cross_attention_kwargs={'concat_conds': concat_conds},
-    ).images.to(vae.dtype) / vae.config.scaling_factor
-
-    pixels = vae.decode(latents).sample
+    if input_bg is None:
+        latents = t2i_pipe(
+            prompt_embeds=conds,
+            negative_prompt_embeds=unconds,
+            width=image_width,
+            height=image_height,
+            num_inference_steps=steps,
+            num_images_per_prompt=num_samples,
+            generator=rng,
+            output_type='latent',
+            guidance_scale=cfg,
+            cross_attention_kwargs={'concat_conds': concat_conds},
+        ).images.to(vae.dtype) / vae.config.scaling_factor
+    else:
+        # bg = resize_and_center_crop(input_bg, image_width, image_height)
+        bg = utils.cv2_resize_img(input_bg, image_width, image_height)
+        bg_latent = numpy2pytorch([bg]).to(device=vae.device, dtype=vae.dtype)
+        bg_latent = vae.encode(bg_latent).latent_dist.mode() * vae.config.scaling_factor
+        latents = i2i_pipe(
+            image=bg_latent,
+            strength=lowres_denoise,
+            prompt_embeds=conds,
+            negative_prompt_embeds=unconds,
+            width=image_width,
+            height=image_height,
+            num_inference_steps=int(round(steps / lowres_denoise)),
+            num_images_per_prompt=num_samples,
+            generator=rng,
+            output_type='latent',
+            guidance_scale=cfg,
+            cross_attention_kwargs={'concat_conds': concat_conds},
+        ).images.to(vae.dtype) / vae.config.scaling_factor
+    
+    # vae decode
+    pixels = vae.decode(latents).sample 
     pixels = pytorch2numpy(pixels)
-    pixels = [resize_without_crop(
-        image=p,
-        target_width=int(round(image_width * highres_scale / 64.0) * 64),
-        target_height=int(round(image_height * highres_scale / 64.0) * 64))
+    rw, rh = int(round(image_width * highres_scale / 64.0) * 64), int(round(image_height * highres_scale / 64.0) * 64)
+    pixels = [utils.cv2_resize_img(p, new_w=rw, new_h=rh)
     for p in pixels]
-
+    
+    # utils.cv2_save_rgb('results/pixel_bg.jpg', pixels[0])
+    mask = utils.cv2_resize_img(mask, new_w=rw, new_h=rh)
+    
     pixels = numpy2pytorch(pixels).to(device=vae.device, dtype=vae.dtype)
     latents = vae.encode(pixels).latent_dist.mode() * vae.config.scaling_factor
     latents = latents.to(device=unet.device, dtype=unet.dtype)
 
     image_height, image_width = latents.shape[2] * 8, latents.shape[3] * 8
-    fg = resize_and_center_crop(input_fg, image_width, image_height)
-    bg = resize_and_center_crop(input_bg, image_width, image_height)
-    concat_conds = numpy2pytorch([fg, bg]).to(device=vae.device, dtype=vae.dtype)
+    fg = utils.cv2_resize_img(fg, image_width, image_height)
+    concat_conds = numpy2pytorch([fg]).to(device=vae.device, dtype=vae.dtype)
     concat_conds = vae.encode(concat_conds).latent_dist.mode() * vae.config.scaling_factor
-    concat_conds = torch.cat([c[None, ...] for c in concat_conds], dim=1)
 
     latents = i2i_pipe(
         image=latents,
@@ -313,148 +348,120 @@ def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, 
     ).images.to(vae.dtype) / vae.config.scaling_factor
 
     pixels = vae.decode(latents).sample
-    pixels = pytorch2numpy(pixels, quant=False)
 
-    return pixels, [fg, bg]
-
-
-@torch.inference_mode()
-def process_relight(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source):
-    input_fg, matting = run_rmbg(input_fg)
-    results, extra_images = process(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source)
-    results = [(x * 255.0).clip(0, 255).astype(np.uint8) for x in results]
-    return results + extra_images
+    return pytorch2numpy(pixels), mask, fg
 
 
 @torch.inference_mode()
-def process_normal(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source):
-    input_fg, matting = run_rmbg(input_fg, sigma=16)
-
-    print('left ...')
-    left = process(input_fg, input_bg, prompt, image_width, image_height, 1, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, BGSource.LEFT.value)[0][0]
-
-    print('right ...')
-    right = process(input_fg, input_bg, prompt, image_width, image_height, 1, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, BGSource.RIGHT.value)[0][0]
-
-    print('bottom ...')
-    bottom = process(input_fg, input_bg, prompt, image_width, image_height, 1, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, BGSource.BOTTOM.value)[0][0]
-
-    print('top ...')
-    top = process(input_fg, input_bg, prompt, image_width, image_height, 1, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, BGSource.TOP.value)[0][0]
-
-    inner_results = [left * 2.0 - 1.0, right * 2.0 - 1.0, bottom * 2.0 - 1.0, top * 2.0 - 1.0]
-
-    ambient = (left + right + bottom + top) / 4.0
-    h, w, _ = ambient.shape
-    matting = resize_and_center_crop((matting[..., 0] * 255.0).clip(0, 255).astype(np.uint8), w, h).astype(np.float32)[..., None] / 255.0
-
-    def safa_divide(a, b):
-        e = 1e-5
-        return ((a + e) / (b + e)) - 1.0
-
-    left = safa_divide(left, ambient)
-    right = safa_divide(right, ambient)
-    bottom = safa_divide(bottom, ambient)
-    top = safa_divide(top, ambient)
-
-    u = (right - left) * 0.5
-    v = (top - bottom) * 0.5
-
-    sigma = 10.0
-    u = np.mean(u, axis=2)
-    v = np.mean(v, axis=2)
-    h = (1.0 - u ** 2.0 - v ** 2.0).clip(0, 1e5) ** (0.5 * sigma)
-    z = np.zeros_like(h)
-
-    normal = np.stack([u, v, h], axis=2)
-    normal /= np.sum(normal ** 2.0, axis=2, keepdims=True) ** 0.5
-    normal = normal * matting + np.stack([z, z, 1 - z], axis=2) * (1 - matting)
-
-    results = [normal, left, right, bottom, top] + inner_results
-    results = [(x * 127.5 + 127.5).clip(0, 255).astype(np.uint8) for x in results]
-    return results
+def process_relight(input_fg, prompt, num_samples, seed, steps, 
+                    a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source, 
+                    blend_value, erode_beta):
+    # mask = utils.cv2_erode_image(mask, beta=erode_beta)
+    input_fg, mask = run_rmbg(input_fg) # H, W
+    # mask = (mask / 255).astype(np.uint8) # convert to  [0, 1] mask map
+    # fuse_fg = run_process_alpha(input_fg, mask, sigma=0.0)
+    fuse_fg = input_fg
+    mask = mask.repeat(3, axis=2)
+    results, mask, fg = process(
+        fuse_fg, mask, prompt, num_samples, seed, steps, 
+            a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source)
+    mask = mask.astype(np.uint8)
+    utils.cv2_save_rgb(osp.join('results','mask.png'), (mask * 255).astype(np.uint8)) 
+    blend_results = utils.blend_ic_light(mask, fg, results, threshold=blend_value)
+    utils.cv2_save_rgb(osp.join('results','fuse_fg.jpg'), fuse_fg)
+    return fuse_fg, blend_results
 
 
 quick_prompts = [
-    'beautiful woman',
-    'handsome man',
-    'beautiful woman, cinematic lighting',
-    'handsome man, cinematic lighting',
-    'beautiful woman, natural lighting',
-    'handsome man, natural lighting',
-    'beautiful woman, neo punk lighting, cyberpunk',
-    'handsome man, neo punk lighting, cyberpunk',
+    'indoor',
+    'outdoor',
+    'sunshine from window',
+    'neon light, city',
+    'sunset over sea',
+    'golden time',
+    'sci-fi RGB glowing, cyberpunk',
+    'natural lighting',
+    'warm atmosphere, at home, bedroom',
+    'magic lit',
+    'evil, gothic, Yharnam',
+    'light and shadow',
+    'shadow from window',
+    'soft studio lighting',
+    'home atmosphere, cozy bedroom illumination',
+    'neon, Wong Kar-wai, warm'
 ]
 quick_prompts = [[x] for x in quick_prompts]
 
 
+quick_subjects = [
+    'beautiful woman, detailed face',
+    'handsome man, detailed face',
+]
+quick_subjects = [[x] for x in quick_subjects]
+
+
 class BGSource(Enum):
-    UPLOAD = "Use Background Image"
-    UPLOAD_FLIP = "Use Flipped Background Image"
+    NONE = "None"
     LEFT = "Left Light"
     RIGHT = "Right Light"
     TOP = "Top Light"
     BOTTOM = "Bottom Light"
-    GREY = "Ambient"
 
 
 block = gr.Blocks().queue()
 with block:
     with gr.Row():
-        gr.Markdown("## IC-Light (Relighting with Foreground and Background Condition)")
+        gr.Markdown("## IC-Light (Relighting with Foreground Condition)")
     with gr.Row():
         with gr.Column():
             with gr.Row():
-                input_fg = gr.Image(source='upload', type="numpy", label="Foreground", height=480)
-                input_bg = gr.Image(source='upload', type="numpy", label="Background", height=480)
-            prompt = gr.Textbox(label="Prompt")
+                input_fg = gr.Image(source='upload', type="numpy", label="Image", height=480)
+                mask = gr.Image(type="numpy", label="Mask Input", height=480)
+            prompt = gr.Textbox(label="Prompt/提示词")
             bg_source = gr.Radio(choices=[e.value for e in BGSource],
-                                 value=BGSource.UPLOAD.value,
-                                 label="Background Source", type='value')
-
-            example_prompts = gr.Dataset(samples=quick_prompts, label='Prompt Quick List', components=[prompt])
-            bg_gallery = gr.Gallery(height=450, object_fit='contain', label='Background Quick List', value=db_examples.bg_samples, columns=5, allow_preview=False)
+                                 value=BGSource.NONE.value,
+                                 label="Lighting Preference (Initial Latent)", type='value')
+            example_quick_subjects = gr.Dataset(samples=quick_subjects, label='Subject Quick List/(人物快速选择;选1个或不选)', samples_per_page=1000, components=[prompt])
+            example_quick_prompts = gr.Dataset(samples=quick_prompts, label='Lighting Quick List/(环境快速选择;选1个或不选)', samples_per_page=1000, components=[prompt])
             relight_button = gr.Button(value="Relight")
 
             with gr.Group():
                 with gr.Row():
-                    num_samples = gr.Slider(label="Images", minimum=1, maximum=12, value=1, step=1)
+                    num_samples = gr.Slider(label="Images", minimum=1, maximum=12, value=4, step=1)
                     seed = gr.Number(label="Seed", value=12345, precision=0)
                 with gr.Row():
-                    image_width = gr.Slider(label="Image Width", minimum=256, maximum=1024, value=512, step=64)
-                    image_height = gr.Slider(label="Image Height", minimum=256, maximum=1024, value=640, step=64)
+                    erode_beta = gr.Slider(label="Erode Pixels", minimum=0, maximum=32, value=3, step=1)
+                    blend_value = gr.Slider(label="Blend Value for mixure", minimum=0.0, maximum=1.0, value=0.4, step=0.01)
+                    # image_width = gr.Slider(label="Image Width", minimum=256, maximum=1024, value=512, step=64)
+                    # image_height = gr.Slider(label="Image Height", minimum=256, maximum=1024, value=512, step=64)
 
-            with gr.Accordion("Advanced options", open=False):
-                steps = gr.Slider(label="Steps", minimum=1, maximum=100, value=20, step=1)
-                cfg = gr.Slider(label="CFG Scale", minimum=1.0, maximum=32.0, value=7.0, step=0.01)
-                highres_scale = gr.Slider(label="Highres Scale", minimum=1.0, maximum=3.0, value=1.5, step=0.01)
-                highres_denoise = gr.Slider(label="Highres Denoise", minimum=0.1, maximum=0.9, value=0.5, step=0.01)
+            with gr.Accordion("Advanced options/高级选项", open=False):
+                steps = gr.Slider(label="Steps", minimum=1, maximum=100, value=25, step=1)
+                cfg = gr.Slider(label="CFG Scale", minimum=1.0, maximum=32.0, value=2, step=0.01)
+                lowres_denoise = gr.Slider(label="Lowres Denoise (for initial latent)", minimum=0.1, maximum=1.0, value=0.9, step=0.01)
+                highres_scale = gr.Slider(label="Highres Scale", minimum=1.0, maximum=3.0, value=1.0, step=0.01)
+                highres_denoise = gr.Slider(label="Highres Denoise", minimum=0.1, maximum=1.0, value=0.5, step=0.01)
                 a_prompt = gr.Textbox(label="Added Prompt", value='best quality')
-                n_prompt = gr.Textbox(label="Negative Prompt",
-                                      value='lowres, bad anatomy, bad hands, cropped, worst quality')
-                normal_button = gr.Button(value="Compute Normal (4x Slower)")
+                n_prompt = gr.Textbox(label="Negative Prompt", value='lowres, bad anatomy, bad hands, cropped, worst quality')
         with gr.Column():
             result_gallery = gr.Gallery(height=832, object_fit='contain', label='Outputs')
     # with gr.Row():
     #     dummy_image_for_outputs = gr.Image(visible=False, label='Result')
     #     gr.Examples(
-    #         fn=lambda *args: [args[-1]],
-    #         examples=db_examples.background_conditioned_examples,
+    #         fn=lambda *args: ([args[-1]], None),
+    #         examples=db_examples.foreground_conditioned_examples,
     #         inputs=[
-    #             input_fg, input_bg, prompt, bg_source, image_width, image_height, seed, dummy_image_for_outputs
+    #             input_fg, prompt, bg_source, image_width, image_height, seed, dummy_image_for_outputs
     #         ],
-    #         outputs=[result_gallery],
+    #         outputs=[result_gallery, output_bg],
     #         run_on_click=True, examples_per_page=1024
     #     )
-    ips = [input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source]
-    relight_button.click(fn=process_relight, inputs=ips, outputs=[result_gallery])
-    normal_button.click(fn=process_normal, inputs=ips, outputs=[result_gallery])
-    example_prompts.click(lambda x: x[0], inputs=example_prompts, outputs=prompt, show_progress=False, queue=False)
-
-    def bg_gallery_selected(gal, evt: gr.SelectData):
-        return gal[evt.index]['name']
-
-    bg_gallery.select(bg_gallery_selected, inputs=bg_gallery, outputs=input_bg)
+    ips = [input_fg, prompt, num_samples, seed, steps, 
+           a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source, blend_value, erode_beta]
+    relight_button.click(fn=process_relight, inputs=ips, outputs=[mask, result_gallery])
+    example_quick_prompts.click(lambda x, y: ', '.join(y.split(', ')[:2] + [x[0]]), inputs=[example_quick_prompts, prompt], 
+                                outputs=prompt, show_progress=False, queue=False)
+    example_quick_subjects.click(lambda x: x[0], inputs=example_quick_subjects, outputs=prompt, show_progress=False, queue=False)
 
 
 block.launch(server_name='0.0.0.0')

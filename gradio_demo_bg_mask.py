@@ -14,7 +14,7 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from briarmbg import BriaRMBG
 from enum import Enum
 from torch.hub import download_url_to_file
-
+import utils
 
 # 'stablediffusionapi/realistic-vision-v51'
 # 'runwayml/stable-diffusion-v1-5'
@@ -26,7 +26,6 @@ unet = UNet2DConditionModel.from_pretrained(sd15_name, subfolder="unet")
 rmbg = BriaRMBG.from_pretrained("briaai/RMBG-1.4")
 
 # Change UNet
-
 with torch.no_grad():
     new_conv_in = torch.nn.Conv2d(12, unet.conv_in.out_channels, unet.conv_in.kernel_size, unet.conv_in.stride, unet.conv_in.padding)
     new_conv_in.weight.zero_()
@@ -226,10 +225,17 @@ def run_rmbg(img, sigma=0.0):
     return result.clip(0, 255).astype(np.uint8), alpha
 
 
-@torch.inference_mode()
-def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source):
-    bg_source = BGSource(bg_source)
+def run_process_alpha(img, mask, sigma=0.0):
+    result = 127 + (img.astype(np.float32) - 127 + sigma) * mask
+    result = result.clip(0, 255).astype(np.uint8) # result背景部分变成灰色
+    return result
 
+
+@torch.inference_mode()
+def process(input_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt, n_prompt, 
+            cfg, highres_scale, highres_denoise, bg_source):
+    bg_source = BGSource(bg_source)
+    
     if bg_source == BGSource.UPLOAD:
         pass
     elif bg_source == BGSource.UPLOAD_FLIP:
@@ -257,8 +263,15 @@ def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, 
 
     rng = torch.Generator(device=device).manual_seed(seed)
 
-    fg = resize_and_center_crop(input_fg, image_width, image_height)
-    bg = resize_and_center_crop(input_bg, image_width, image_height)
+    # fg = resize_and_center_crop(input_fg, image_width, image_height)
+    # bg = resize_and_center_crop(input_bg, image_width, image_height)
+    # mask = resize_and_center_crop(mask, image_width, image_height)
+    
+    fg = utils.cv2_resize_img_aspect(input_fg)
+    mask = utils.cv2_resize_img_aspect(mask)
+    image_width, image_height = fg.shape[:2]
+    bg = utils.cv2_resize_img(input_bg, image_width, image_height)
+    
     concat_conds = numpy2pytorch([fg, bg]).to(device=vae.device, dtype=vae.dtype)
     concat_conds = vae.encode(concat_conds).latent_dist.mode() * vae.config.scaling_factor
     concat_conds = torch.cat([c[None, ...] for c in concat_conds], dim=1)
@@ -291,8 +304,15 @@ def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, 
     latents = latents.to(device=unet.device, dtype=unet.dtype)
 
     image_height, image_width = latents.shape[2] * 8, latents.shape[3] * 8
-    fg = resize_and_center_crop(input_fg, image_width, image_height)
-    bg = resize_and_center_crop(input_bg, image_width, image_height)
+    
+    # fg = resize_and_center_crop(input_fg, image_width, image_height)
+    # bg = resize_and_center_crop(input_bg, image_width, image_height)
+    # mask = resize_without_crop(mask, image_width, image_height)
+    
+    fg = utils.cv2_resize_img(fg, image_width, image_height)
+    bg = utils.cv2_resize_img(bg, image_width, image_height)
+    mask = utils.cv2_resize_img(mask, image_width, image_height)
+    
     concat_conds = numpy2pytorch([fg, bg]).to(device=vae.device, dtype=vae.dtype)
     concat_conds = vae.encode(concat_conds).latent_dist.mode() * vae.config.scaling_factor
     concat_conds = torch.cat([c[None, ...] for c in concat_conds], dim=1)
@@ -315,19 +335,25 @@ def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, 
     pixels = vae.decode(latents).sample
     pixels = pytorch2numpy(pixels, quant=False)
 
-    return pixels, [fg, bg]
+    return pixels, fg, mask
 
 
 @torch.inference_mode()
-def process_relight(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source):
-    input_fg, matting = run_rmbg(input_fg)
-    results, extra_images = process(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source)
+def process_relight(input_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt, n_prompt, cfg, 
+                    highres_scale, highres_denoise, bg_source, blend_value):
+    mask = utils.mask_to_binary(mask)
+    fuse_fg = run_process_alpha(input_fg, mask, sigma=0.0)
+    results, fg, mask = process(
+        fuse_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt, n_prompt, 
+        cfg, highres_scale, highres_denoise, bg_source)
     results = [(x * 255.0).clip(0, 255).astype(np.uint8) for x in results]
-    return results + extra_images
+    blend_results = utils.blend_ic_light(mask, fg, results, threshold=blend_value)
+    return blend_results
 
 
 @torch.inference_mode()
-def process_normal(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source):
+def process_normal(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, 
+                   cfg, highres_scale, highres_denoise, bg_source):
     input_fg, matting = run_rmbg(input_fg, sigma=16)
 
     print('left ...')
@@ -405,24 +431,28 @@ with block:
     with gr.Row():
         with gr.Column():
             with gr.Row():
-                input_fg = gr.Image(source='upload', type="numpy", label="Foreground", height=480)
-                input_bg = gr.Image(source='upload', type="numpy", label="Background", height=480)
+                input_fg = gr.Image(source='upload', type="numpy", label="Foreground", height=320)
+                mask = gr.Image(source='upload', type="numpy", label="Mask", height=320)
+                input_bg = gr.Image(source='upload', type="numpy", label="Background", height=320)
+                
             prompt = gr.Textbox(label="Prompt")
             bg_source = gr.Radio(choices=[e.value for e in BGSource],
                                  value=BGSource.UPLOAD.value,
                                  label="Background Source", type='value')
 
             example_prompts = gr.Dataset(samples=quick_prompts, label='Prompt Quick List', components=[prompt])
-            bg_gallery = gr.Gallery(height=450, object_fit='contain', label='Background Quick List', value=db_examples.bg_samples, columns=5, allow_preview=False)
+            bg_gallery = gr.Gallery(height=450, object_fit='contain', label='Background Quick List', 
+                                    value=db_examples.bg_samples, columns=5, allow_preview=False)
             relight_button = gr.Button(value="Relight")
 
             with gr.Group():
                 with gr.Row():
-                    num_samples = gr.Slider(label="Images", minimum=1, maximum=12, value=1, step=1)
-                    seed = gr.Number(label="Seed", value=12345, precision=0)
-                with gr.Row():
-                    image_width = gr.Slider(label="Image Width", minimum=256, maximum=1024, value=512, step=64)
-                    image_height = gr.Slider(label="Image Height", minimum=256, maximum=1024, value=640, step=64)
+                    num_samples = gr.Slider(label="Images", minimum=1, maximum=12, value=2, step=1)
+                    blend_value = gr.Slider(label="blend_value", minimum=0.0, maximum=1.0, value=0.4, step=0.1)
+                    seed = gr.Number(label="Seed", value=4342, precision=0)
+                # with gr.Row():
+                #     image_width = gr.Slider(label="Image Width", minimum=256, maximum=1024, value=512, step=64)
+                #     image_height = gr.Slider(label="Image Height", minimum=256, maximum=1024, value=640, step=64)
 
             with gr.Accordion("Advanced options", open=False):
                 steps = gr.Slider(label="Steps", minimum=1, maximum=100, value=20, step=1)
@@ -435,20 +465,11 @@ with block:
                 normal_button = gr.Button(value="Compute Normal (4x Slower)")
         with gr.Column():
             result_gallery = gr.Gallery(height=832, object_fit='contain', label='Outputs')
-    # with gr.Row():
-    #     dummy_image_for_outputs = gr.Image(visible=False, label='Result')
-    #     gr.Examples(
-    #         fn=lambda *args: [args[-1]],
-    #         examples=db_examples.background_conditioned_examples,
-    #         inputs=[
-    #             input_fg, input_bg, prompt, bg_source, image_width, image_height, seed, dummy_image_for_outputs
-    #         ],
-    #         outputs=[result_gallery],
-    #         run_on_click=True, examples_per_page=1024
-    #     )
-    ips = [input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source]
+    
+    ips = [input_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt, n_prompt, 
+           cfg, highres_scale, highres_denoise, bg_source, blend_value]
     relight_button.click(fn=process_relight, inputs=ips, outputs=[result_gallery])
-    normal_button.click(fn=process_normal, inputs=ips, outputs=[result_gallery])
+    # normal_button.click(fn=process_normal, inputs=ips, outputs=[result_gallery])
     example_prompts.click(lambda x: x[0], inputs=example_prompts, outputs=prompt, show_progress=False, queue=False)
 
     def bg_gallery_selected(gal, evt: gr.SelectData):

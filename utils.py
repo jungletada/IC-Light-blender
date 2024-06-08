@@ -17,7 +17,7 @@ def cv2_load_rgb(path):
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
-def cv2_resize_img_aspect(img, max_size=1024, pad_to_64=True):
+def cv2_resize_img_aspect(img, max_size=960, pad_to_64=True):
     h, w = img.shape[:2]
     if max(h, w) > max_size:
         if h > w:
@@ -60,13 +60,23 @@ def cv2_erode_image(mask, beta=2):
     else:
         eroded_mask = cv2.erode(mask, kernel, iterations=1) # 进行腐蚀操作
     return eroded_mask
-    
+
+
+def mask_to_binary(mask, rgb_dim=True):
+    gray_mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+    _, binary_image = cv2.threshold(gray_mask, 200, 1, cv2.THRESH_BINARY)
+    binary_array = binary_image[...,np.newaxis].astype(np.uint8)
+    if rgb_dim:
+        binary_array = binary_array.repeat(3, axis=2)
+        
+    return binary_array
+        
 
 def blend_ic_light(mask, resized_fg, ic_fg_results, threshold):
     blended_ic_results = []
     for i, ic_fg in enumerate(ic_fg_results):
-
-        diff = (ic_fg - resized_fg) * mask.astype(np.uint8)
+        oringin_ic = ic_fg
+        diff = ((ic_fg - resized_fg) * mask).astype(np.uint8)
         min_diff, max_diff = np.min(diff, axis=(0,1)), np.max(diff, axis=(0,1))
         weight_ic_fg = (diff - min_diff) / (max_diff - min_diff + 1e-6)
         weight_ic_fg[weight_ic_fg > threshold] = threshold
@@ -76,18 +86,16 @@ def blend_ic_light(mask, resized_fg, ic_fg_results, threshold):
         blended = (ic_fg * weight_ic_fg + resized_fg * weight_resized_fg).astype(np.uint8)
         ic_fg[mask==1] = blended[mask==1]
         blended_ic_results.append(ic_fg)
-        cv2_save_rgb(f'results/blend_{i}.jpg', ic_fg.astype(np.uint8))
+        cv2_save_rgb(f'results/ic_{i}.jpg', oringin_ic.astype(np.uint8))
+        # cv2_save_rgb(f'results/blend_{i}.jpg', ic_fg.astype(np.uint8))
     return blended_ic_results
         
 
 if __name__ == '__main__':
-    mask = cv2_load_rgb(osp.join('results','mask.png')) 
-    mask = mask / 255.
-    mask = mask.astype(np.uint8)
-    resized_fg = cv2_load_rgb(osp.join('results','fg_image.jpg'))
-    num_samples = 4
-    ic_fg_results = []
-    for i in range(num_samples):
-        ic_fg = cv2_load_rgb(osp.join('results',f'iclight_image_{i}.jpg'))
-        ic_fg_results.append(ic_fg)
-    blend_ic_light(mask, resized_fg, ic_fg_results)
+    mask = cv2_load_rgb(osp.join('results','aittor0_mask.jpg')) 
+    image = cv2_load_rgb(osp.join('results','aittor0.jpg')) 
+    bin_mask = mask_to_binary(mask)
+    result = 127 + (image.astype(np.float32) - 127 + 0.0) * bin_mask
+    result = result.clip(0, 255).astype(np.uint8) # result背景部分变成灰色
+    cv2_save_rgb(osp.join('results','aittor0_fg.jpg'), result)
+    
