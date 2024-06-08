@@ -357,10 +357,7 @@ def process_relight(input_fg, prompt, num_samples, seed, steps,
                     a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source, 
                     blend_value, erode_beta):
     # mask = utils.cv2_erode_image(mask, beta=erode_beta)
-    input_fg, mask = run_rmbg(input_fg) # H, W
-    # mask = (mask / 255).astype(np.uint8) # convert to  [0, 1] mask map
-    # fuse_fg = run_process_alpha(input_fg, mask, sigma=0.0)
-    fuse_fg = input_fg
+    fuse_fg, mask = run_rmbg(input_fg) # H, W
     mask = mask.repeat(3, axis=2)
     results, mask, fg = process(
         fuse_fg, mask, prompt, num_samples, seed, steps, 
@@ -416,7 +413,7 @@ with block:
         with gr.Column():
             with gr.Row():
                 input_fg = gr.Image(source='upload', type="numpy", label="Image", height=480)
-                mask = gr.Image(type="numpy", label="Mask Input", height=480)
+                mask = gr.Image(type="numpy", label="Mask", height=480)
             prompt = gr.Textbox(label="Prompt/提示词")
             bg_source = gr.Radio(choices=[e.value for e in BGSource],
                                  value=BGSource.NONE.value,

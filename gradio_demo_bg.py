@@ -14,7 +14,7 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from briarmbg import BriaRMBG
 from enum import Enum
 from torch.hub import download_url_to_file
-
+import utils
 
 # 'stablediffusionapi/realistic-vision-v51'
 # 'runwayml/stable-diffusion-v1-5'
@@ -222,14 +222,23 @@ def run_rmbg(img, sigma=0.0):
     alpha = torch.nn.functional.interpolate(alpha, size=(H, W), mode="bilinear")
     alpha = alpha.movedim(1, -1)[0]
     alpha = alpha.detach().float().cpu().numpy().clip(0, 1)
+    alpha[alpha < 0.97] = 0
+    alpha[alpha >= 0.97] = 1
     result = 127 + (img.astype(np.float32) - 127 + sigma) * alpha
     return result.clip(0, 255).astype(np.uint8), alpha
 
 
 @torch.inference_mode()
-def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source):
+def process(input_fg, input_bg, mask, prompt, i_width, i_height, num_samples, seed, steps, a_prompt, n_prompt, 
+            cfg, highres_scale, highres_denoise, bg_source):
+    
+    fg = utils.cv2_resize_img_aspect(input_fg)
+    mask = utils.cv2_resize_img_aspect(mask)
+    image_width, image_height = fg.shape[:2]
+    bg = utils.cv2_resize_img(input_bg, image_width, image_height)
+    print(fg.shape, bg.shape)
+    
     bg_source = BGSource(bg_source)
-
     if bg_source == BGSource.UPLOAD:
         pass
     elif bg_source == BGSource.UPLOAD_FLIP:
@@ -257,8 +266,6 @@ def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, 
 
     rng = torch.Generator(device=device).manual_seed(seed)
 
-    fg = resize_and_center_crop(input_fg, image_width, image_height)
-    bg = resize_and_center_crop(input_bg, image_width, image_height)
     concat_conds = numpy2pytorch([fg, bg]).to(device=vae.device, dtype=vae.dtype)
     concat_conds = vae.encode(concat_conds).latent_dist.mode() * vae.config.scaling_factor
     concat_conds = torch.cat([c[None, ...] for c in concat_conds], dim=1)
@@ -280,10 +287,10 @@ def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, 
 
     pixels = vae.decode(latents).sample
     pixels = pytorch2numpy(pixels)
-    pixels = [resize_without_crop(
-        image=p,
-        target_width=int(round(image_width * highres_scale / 64.0) * 64),
-        target_height=int(round(image_height * highres_scale / 64.0) * 64))
+    pixels = [utils.cv2_resize_img(
+        p,
+        int(round(image_width * highres_scale / 64.0) * 64),
+        int(round(image_height * highres_scale / 64.0) * 64))
     for p in pixels]
 
     pixels = numpy2pytorch(pixels).to(device=vae.device, dtype=vae.dtype)
@@ -291,8 +298,12 @@ def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, 
     latents = latents.to(device=unet.device, dtype=unet.dtype)
 
     image_height, image_width = latents.shape[2] * 8, latents.shape[3] * 8
-    fg = resize_and_center_crop(input_fg, image_width, image_height)
-    bg = resize_and_center_crop(input_bg, image_width, image_height)
+    # fg = resize_and_center_crop(input_fg, image_width, image_height)
+    # bg = resize_and_center_crop(input_bg, image_width, image_height)
+        
+    fg = utils.cv2_resize_img(fg, image_width, image_height)
+    bg = utils.cv2_resize_img(bg, image_width, image_height)
+    mask = utils.cv2_resize_img(mask, image_width, image_height)
     concat_conds = numpy2pytorch([fg, bg]).to(device=vae.device, dtype=vae.dtype)
     concat_conds = vae.encode(concat_conds).latent_dist.mode() * vae.config.scaling_factor
     concat_conds = torch.cat([c[None, ...] for c in concat_conds], dim=1)
@@ -315,15 +326,19 @@ def process(input_fg, input_bg, prompt, image_width, image_height, num_samples, 
     pixels = vae.decode(latents).sample
     pixels = pytorch2numpy(pixels, quant=False)
 
-    return pixels, [fg, bg]
+    return pixels, fg, mask, bg
 
 
 @torch.inference_mode()
-def process_relight(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source):
-    input_fg, matting = run_rmbg(input_fg)
-    results, extra_images = process(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source)
+def process_relight(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, 
+                    cfg, highres_scale, highres_denoise, bg_source):
+    input_fg, mask = run_rmbg(input_fg) # H, W
+    
+    results, fg, mask, bg = process(input_fg, input_bg, mask, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, 
+                    cfg, highres_scale, highres_denoise, bg_source)
     results = [(x * 255.0).clip(0, 255).astype(np.uint8) for x in results]
-    return results + extra_images
+    blend_results = utils.blend_ic_light_bg(mask, fg, bg, results, threshold=0.4)
+    return blend_results
 
 
 @torch.inference_mode()

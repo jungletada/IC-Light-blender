@@ -1,7 +1,31 @@
 import cv2
+import torch
 import numpy as np
 import os.path as osp
 import PIL.Image as Image
+
+
+@torch.inference_mode()
+def pytorch2numpy(imgs, quant=True):
+    results = []
+    for x in imgs:
+        y = x.movedim(0, -1)
+        if quant:
+            y = y * 127.5 + 127.5
+            y = y.detach().float().cpu().numpy().clip(0, 255).astype(np.uint8)
+        else:
+            y = y * 0.5 + 0.5
+            y = y.detach().float().cpu().numpy().clip(0, 1).astype(np.float32)
+
+        results.append(y)
+    return results
+
+
+@torch.inference_mode()
+def numpy2pytorch(imgs):
+    h = torch.from_numpy(np.stack(imgs, axis=0)).float() / 127.0 - 1.0  # so that 127 must be strictly 0.0
+    h = h.movedim(-1, 1)
+    return h
 
 
 def cv2_save_rgb(path, img):
@@ -72,24 +96,48 @@ def mask_to_binary(mask, rgb_dim=True):
     return binary_array
         
 
-def blend_ic_light(mask, resized_fg, ic_fg_results, threshold):
+def blend_ic_light(mask, resized_fg, ic_results, threshold):
     blended_ic_results = []
-    for i, ic_fg in enumerate(ic_fg_results):
-        oringin_ic = ic_fg
-        diff = ((ic_fg - resized_fg) * mask).astype(np.uint8)
+    for i, ic_res in enumerate(ic_results):
+        diff = ((ic_res - resized_fg) * mask).astype(np.uint8)
         min_diff, max_diff = np.min(diff, axis=(0,1)), np.max(diff, axis=(0,1))
         weight_ic_fg = (diff - min_diff) / (max_diff - min_diff + 1e-6)
         weight_ic_fg[weight_ic_fg > threshold] = threshold
-        weight_resized_fg = 1 - weight_ic_fg
+        weight_fg = 1 - weight_ic_fg
         
         # 计算混合后的图像
-        blended = (ic_fg * weight_ic_fg + resized_fg * weight_resized_fg).astype(np.uint8)
-        ic_fg[mask==1] = blended[mask==1]
-        blended_ic_results.append(ic_fg)
-        cv2_save_rgb(f'results/ic_{i}.jpg', oringin_ic.astype(np.uint8))
+        blended = (ic_res * weight_ic_fg + resized_fg * weight_fg).astype(np.uint8)
+        ic_res[mask==1] = blended[mask==1]
+        blended_ic_results.append(ic_res)
+        # cv2_save_rgb(f'results/ic_{i}.jpg', oringin_ic.astype(np.uint8))
         # cv2_save_rgb(f'results/blend_{i}.jpg', ic_fg.astype(np.uint8))
     return blended_ic_results
+
+
+def blend_ic_light_bg(mask, resized_fg, resized_bg, ic_results, threshold):
+    blended_ic_results = []
+    for i, ic_res in enumerate(ic_results):
+        diff = ((ic_res - resized_fg) * mask).astype(np.uint8)
+        min_diff, max_diff = np.min(diff, axis=(0,1)), np.max(diff, axis=(0,1))
+        weight_ic_fg = (diff - min_diff) / (max_diff - min_diff + 1e-6)
+        weight_ic_fg[weight_ic_fg > threshold] = threshold
+        weight_fg = 1 - weight_ic_fg
         
+        diff = ((ic_res - resized_bg) * (1 - mask)).astype(np.uint8)
+        min_diff, max_diff = np.min(diff, axis=(0,1)), np.max(diff, axis=(0,1))
+        weight_ic_bg = (diff - min_diff) / (max_diff - min_diff + 1e-6)
+        weight_ic_bg[weight_ic_bg > threshold] = threshold
+        weight_bg = 1 - weight_ic_bg
+        
+        # 计算混合后的图像
+        blended_fg = (ic_res * weight_ic_fg + resized_fg * weight_fg).astype(np.uint8)
+        blended_bg = (ic_res * weight_ic_bg + resized_bg * weight_bg).astype(np.uint8)
+        ic_res = blended_fg * mask + blended_bg * (1 - mask)
+        blended_ic_results.append(ic_res.astype(np.uint8))
+
+    return blended_ic_results
+
+
 
 if __name__ == '__main__':
     mask = cv2_load_rgb(osp.join('results','aittor0_mask.jpg')) 

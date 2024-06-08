@@ -247,7 +247,7 @@ def process(input_fg, mask, prompt, num_samples, seed, steps,
             a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source):
     fg = utils.cv2_resize_img_aspect(input_fg)
     mask = utils.cv2_resize_img_aspect(mask)
-    fg = input_fg
+    # fg = input_fg
     image_height, image_width = fg.shape[:2]
     
     bg_source = BGSource(bg_source)
@@ -318,7 +318,6 @@ def process(input_fg, mask, prompt, num_samples, seed, steps,
     rw, rh = int(round(image_width * highres_scale / 64.0) * 64), int(round(image_height * highres_scale / 64.0) * 64)
     pixels = [utils.cv2_resize_img(p, new_w=rw, new_h=rh)
     for p in pixels]
-    
     # utils.cv2_save_rgb('results/pixel_bg.jpg', pixels[0])
     mask = utils.cv2_resize_img(mask, new_w=rw, new_h=rh)
     

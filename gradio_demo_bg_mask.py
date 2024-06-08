@@ -23,7 +23,7 @@ tokenizer = CLIPTokenizer.from_pretrained(sd15_name, subfolder="tokenizer")
 text_encoder = CLIPTextModel.from_pretrained(sd15_name, subfolder="text_encoder")
 vae = AutoencoderKL.from_pretrained(sd15_name, subfolder="vae")
 unet = UNet2DConditionModel.from_pretrained(sd15_name, subfolder="unet")
-rmbg = BriaRMBG.from_pretrained("briaai/RMBG-1.4")
+# rmbg = BriaRMBG.from_pretrained("briaai/RMBG-1.4")
 
 # Change UNet
 with torch.no_grad():
@@ -64,7 +64,7 @@ device = torch.device('cuda')
 text_encoder = text_encoder.to(device=device, dtype=torch.float16)
 vae = vae.to(device=device, dtype=torch.bfloat16)
 unet = unet.to(device=device, dtype=torch.float16)
-rmbg = rmbg.to(device=device, dtype=torch.float32)
+# rmbg = rmbg.to(device=device, dtype=torch.float32)
 
 # SDP
 unet.set_attn_processor(AttnProcessor2_0())
@@ -210,19 +210,19 @@ def resize_without_crop(image, target_width, target_height):
     return np.array(resized_image)
 
 
-@torch.inference_mode()
-def run_rmbg(img, sigma=0.0):
-    H, W, C = img.shape
-    assert C == 3
-    k = (256.0 / float(H * W)) ** 0.5
-    feed = resize_without_crop(img, int(64 * round(W * k)), int(64 * round(H * k)))
-    feed = numpy2pytorch([feed]).to(device=device, dtype=torch.float32)
-    alpha = rmbg(feed)[0][0]
-    alpha = torch.nn.functional.interpolate(alpha, size=(H, W), mode="bilinear")
-    alpha = alpha.movedim(1, -1)[0]
-    alpha = alpha.detach().float().cpu().numpy().clip(0, 1)
-    result = 127 + (img.astype(np.float32) - 127 + sigma) * alpha
-    return result.clip(0, 255).astype(np.uint8), alpha
+# @torch.inference_mode()
+# def run_rmbg(img, sigma=0.0):
+#     H, W, C = img.shape
+#     assert C == 3
+#     k = (256.0 / float(H * W)) ** 0.5
+#     feed = resize_without_crop(img, int(64 * round(W * k)), int(64 * round(H * k)))
+#     feed = numpy2pytorch([feed]).to(device=device, dtype=torch.float32)
+#     alpha = rmbg(feed)[0][0]
+#     alpha = torch.nn.functional.interpolate(alpha, size=(H, W), mode="bilinear")
+#     alpha = alpha.movedim(1, -1)[0]
+#     alpha = alpha.detach().float().cpu().numpy().clip(0, 1)
+#     result = 127 + (img.astype(np.float32) - 127 + sigma) * alpha
+#     return result.clip(0, 255).astype(np.uint8), alpha
 
 
 def run_process_alpha(img, mask, sigma=0.0):
@@ -234,6 +234,12 @@ def run_process_alpha(img, mask, sigma=0.0):
 @torch.inference_mode()
 def process(input_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt, n_prompt, 
             cfg, highres_scale, highres_denoise, bg_source):
+    
+    fg = utils.cv2_resize_img_aspect(input_fg)
+    mask = utils.cv2_resize_img_aspect(mask)
+    image_width, image_height = fg.shape[:2]
+    bg = utils.cv2_resize_img(input_bg, image_width, image_height)
+    
     bg_source = BGSource(bg_source)
     
     if bg_source == BGSource.UPLOAD:
@@ -266,11 +272,6 @@ def process(input_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt
     # fg = resize_and_center_crop(input_fg, image_width, image_height)
     # bg = resize_and_center_crop(input_bg, image_width, image_height)
     # mask = resize_and_center_crop(mask, image_width, image_height)
-    
-    fg = utils.cv2_resize_img_aspect(input_fg)
-    mask = utils.cv2_resize_img_aspect(mask)
-    image_width, image_height = fg.shape[:2]
-    bg = utils.cv2_resize_img(input_bg, image_width, image_height)
     
     concat_conds = numpy2pytorch([fg, bg]).to(device=vae.device, dtype=vae.dtype)
     concat_conds = vae.encode(concat_conds).latent_dist.mode() * vae.config.scaling_factor
@@ -335,7 +336,7 @@ def process(input_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt
     pixels = vae.decode(latents).sample
     pixels = pytorch2numpy(pixels, quant=False)
 
-    return pixels, fg, mask
+    return pixels, fg, mask, bg
 
 
 @torch.inference_mode()
@@ -343,62 +344,62 @@ def process_relight(input_fg, input_bg, mask, prompt, num_samples, seed, steps, 
                     highres_scale, highres_denoise, bg_source, blend_value):
     mask = utils.mask_to_binary(mask)
     fuse_fg = run_process_alpha(input_fg, mask, sigma=0.0)
-    results, fg, mask = process(
+    results, fg, mask, bg = process(
         fuse_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt, n_prompt, 
         cfg, highres_scale, highres_denoise, bg_source)
     results = [(x * 255.0).clip(0, 255).astype(np.uint8) for x in results]
-    blend_results = utils.blend_ic_light(mask, fg, results, threshold=blend_value)
+    blend_results = utils.blend_ic_light_bg(mask, fg, bg, results, threshold=blend_value)
     return blend_results
 
 
-@torch.inference_mode()
-def process_normal(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, 
-                   cfg, highres_scale, highres_denoise, bg_source):
-    input_fg, matting = run_rmbg(input_fg, sigma=16)
+# @torch.inference_mode()
+# def process_normal(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, 
+#                    cfg, highres_scale, highres_denoise, bg_source):
+#     input_fg, matting = run_rmbg(input_fg, sigma=16)
 
-    print('left ...')
-    left = process(input_fg, input_bg, prompt, image_width, image_height, 1, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, BGSource.LEFT.value)[0][0]
+#     print('left ...')
+#     left = process(input_fg, input_bg, prompt, image_width, image_height, 1, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, BGSource.LEFT.value)[0][0]
 
-    print('right ...')
-    right = process(input_fg, input_bg, prompt, image_width, image_height, 1, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, BGSource.RIGHT.value)[0][0]
+#     print('right ...')
+#     right = process(input_fg, input_bg, prompt, image_width, image_height, 1, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, BGSource.RIGHT.value)[0][0]
 
-    print('bottom ...')
-    bottom = process(input_fg, input_bg, prompt, image_width, image_height, 1, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, BGSource.BOTTOM.value)[0][0]
+#     print('bottom ...')
+#     bottom = process(input_fg, input_bg, prompt, image_width, image_height, 1, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, BGSource.BOTTOM.value)[0][0]
 
-    print('top ...')
-    top = process(input_fg, input_bg, prompt, image_width, image_height, 1, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, BGSource.TOP.value)[0][0]
+#     print('top ...')
+#     top = process(input_fg, input_bg, prompt, image_width, image_height, 1, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, BGSource.TOP.value)[0][0]
 
-    inner_results = [left * 2.0 - 1.0, right * 2.0 - 1.0, bottom * 2.0 - 1.0, top * 2.0 - 1.0]
+#     inner_results = [left * 2.0 - 1.0, right * 2.0 - 1.0, bottom * 2.0 - 1.0, top * 2.0 - 1.0]
 
-    ambient = (left + right + bottom + top) / 4.0
-    h, w, _ = ambient.shape
-    matting = resize_and_center_crop((matting[..., 0] * 255.0).clip(0, 255).astype(np.uint8), w, h).astype(np.float32)[..., None] / 255.0
+#     ambient = (left + right + bottom + top) / 4.0
+#     h, w, _ = ambient.shape
+#     matting = resize_and_center_crop((matting[..., 0] * 255.0).clip(0, 255).astype(np.uint8), w, h).astype(np.float32)[..., None] / 255.0
 
-    def safa_divide(a, b):
-        e = 1e-5
-        return ((a + e) / (b + e)) - 1.0
+#     def safa_divide(a, b):
+#         e = 1e-5
+#         return ((a + e) / (b + e)) - 1.0
 
-    left = safa_divide(left, ambient)
-    right = safa_divide(right, ambient)
-    bottom = safa_divide(bottom, ambient)
-    top = safa_divide(top, ambient)
+#     left = safa_divide(left, ambient)
+#     right = safa_divide(right, ambient)
+#     bottom = safa_divide(bottom, ambient)
+#     top = safa_divide(top, ambient)
 
-    u = (right - left) * 0.5
-    v = (top - bottom) * 0.5
+#     u = (right - left) * 0.5
+#     v = (top - bottom) * 0.5
 
-    sigma = 10.0
-    u = np.mean(u, axis=2)
-    v = np.mean(v, axis=2)
-    h = (1.0 - u ** 2.0 - v ** 2.0).clip(0, 1e5) ** (0.5 * sigma)
-    z = np.zeros_like(h)
+#     sigma = 10.0
+#     u = np.mean(u, axis=2)
+#     v = np.mean(v, axis=2)
+#     h = (1.0 - u ** 2.0 - v ** 2.0).clip(0, 1e5) ** (0.5 * sigma)
+#     z = np.zeros_like(h)
 
-    normal = np.stack([u, v, h], axis=2)
-    normal /= np.sum(normal ** 2.0, axis=2, keepdims=True) ** 0.5
-    normal = normal * matting + np.stack([z, z, 1 - z], axis=2) * (1 - matting)
+#     normal = np.stack([u, v, h], axis=2)
+#     normal /= np.sum(normal ** 2.0, axis=2, keepdims=True) ** 0.5
+#     normal = normal * matting + np.stack([z, z, 1 - z], axis=2) * (1 - matting)
 
-    results = [normal, left, right, bottom, top] + inner_results
-    results = [(x * 127.5 + 127.5).clip(0, 255).astype(np.uint8) for x in results]
-    return results
+#     results = [normal, left, right, bottom, top] + inner_results
+#     results = [(x * 127.5 + 127.5).clip(0, 255).astype(np.uint8) for x in results]
+#     return results
 
 
 quick_prompts = [
