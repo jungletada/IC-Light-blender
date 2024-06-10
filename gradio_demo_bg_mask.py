@@ -14,7 +14,7 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from briarmbg import BriaRMBG
 from enum import Enum
 from torch.hub import download_url_to_file
-import utils
+import utils_img
 
 # 'stablediffusionapi/realistic-vision-v51'
 # 'runwayml/stable-diffusion-v1-5'
@@ -235,10 +235,10 @@ def run_process_alpha(img, mask, sigma=0.0):
 def process(input_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt, n_prompt, 
             cfg, highres_scale, highres_denoise, bg_source):
     
-    fg = utils.cv2_resize_img_aspect(input_fg)
-    mask = utils.cv2_resize_img_aspect(mask)
+    fg = utils_img.cv2_resize_img_aspect(input_fg)
+    mask = utils_img.cv2_resize_img_aspect(mask)
     image_width, image_height = fg.shape[:2]
-    bg = utils.cv2_resize_img(input_bg, image_width, image_height)
+    bg = utils_img.cv2_resize_img(input_bg, image_width, image_height)
     
     bg_source = BGSource(bg_source)
     
@@ -310,9 +310,9 @@ def process(input_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt
     # bg = resize_and_center_crop(input_bg, image_width, image_height)
     # mask = resize_without_crop(mask, image_width, image_height)
     
-    fg = utils.cv2_resize_img(fg, image_width, image_height)
-    bg = utils.cv2_resize_img(bg, image_width, image_height)
-    mask = utils.cv2_resize_img(mask, image_width, image_height)
+    fg = utils_img.cv2_resize_img(fg, image_width, image_height)
+    bg = utils_img.cv2_resize_img(bg, image_width, image_height)
+    mask = utils_img.cv2_resize_img(mask, image_width, image_height)
     
     concat_conds = numpy2pytorch([fg, bg]).to(device=vae.device, dtype=vae.dtype)
     concat_conds = vae.encode(concat_conds).latent_dist.mode() * vae.config.scaling_factor
@@ -341,65 +341,15 @@ def process(input_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt
 
 @torch.inference_mode()
 def process_relight(input_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt, n_prompt, cfg, 
-                    highres_scale, highres_denoise, bg_source, blend_value):
-    mask = utils.mask_to_binary(mask)
+                    highres_scale, highres_denoise, bg_source, blend_value_fg, blend_value_bg):
+    mask = utils_img.mask_to_binary(mask)
     fuse_fg = run_process_alpha(input_fg, mask, sigma=0.0)
     results, fg, mask, bg = process(
         fuse_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt, n_prompt, 
         cfg, highres_scale, highres_denoise, bg_source)
     results = [(x * 255.0).clip(0, 255).astype(np.uint8) for x in results]
-    blend_results = utils.blend_ic_light_bg(mask, fg, bg, results, threshold=blend_value)
+    blend_results = utils_img.blend_ic_light_bg(mask, fg, bg, results, blend_value_fg=blend_value_fg, blend_value_bg=blend_value_bg)
     return blend_results
-
-
-# @torch.inference_mode()
-# def process_normal(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, 
-#                    cfg, highres_scale, highres_denoise, bg_source):
-#     input_fg, matting = run_rmbg(input_fg, sigma=16)
-
-#     print('left ...')
-#     left = process(input_fg, input_bg, prompt, image_width, image_height, 1, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, BGSource.LEFT.value)[0][0]
-
-#     print('right ...')
-#     right = process(input_fg, input_bg, prompt, image_width, image_height, 1, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, BGSource.RIGHT.value)[0][0]
-
-#     print('bottom ...')
-#     bottom = process(input_fg, input_bg, prompt, image_width, image_height, 1, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, BGSource.BOTTOM.value)[0][0]
-
-#     print('top ...')
-#     top = process(input_fg, input_bg, prompt, image_width, image_height, 1, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, BGSource.TOP.value)[0][0]
-
-#     inner_results = [left * 2.0 - 1.0, right * 2.0 - 1.0, bottom * 2.0 - 1.0, top * 2.0 - 1.0]
-
-#     ambient = (left + right + bottom + top) / 4.0
-#     h, w, _ = ambient.shape
-#     matting = resize_and_center_crop((matting[..., 0] * 255.0).clip(0, 255).astype(np.uint8), w, h).astype(np.float32)[..., None] / 255.0
-
-#     def safa_divide(a, b):
-#         e = 1e-5
-#         return ((a + e) / (b + e)) - 1.0
-
-#     left = safa_divide(left, ambient)
-#     right = safa_divide(right, ambient)
-#     bottom = safa_divide(bottom, ambient)
-#     top = safa_divide(top, ambient)
-
-#     u = (right - left) * 0.5
-#     v = (top - bottom) * 0.5
-
-#     sigma = 10.0
-#     u = np.mean(u, axis=2)
-#     v = np.mean(v, axis=2)
-#     h = (1.0 - u ** 2.0 - v ** 2.0).clip(0, 1e5) ** (0.5 * sigma)
-#     z = np.zeros_like(h)
-
-#     normal = np.stack([u, v, h], axis=2)
-#     normal /= np.sum(normal ** 2.0, axis=2, keepdims=True) ** 0.5
-#     normal = normal * matting + np.stack([z, z, 1 - z], axis=2) * (1 - matting)
-
-#     results = [normal, left, right, bottom, top] + inner_results
-#     results = [(x * 127.5 + 127.5).clip(0, 255).astype(np.uint8) for x in results]
-#     return results
 
 
 quick_prompts = [
@@ -449,12 +399,10 @@ with block:
             with gr.Group():
                 with gr.Row():
                     num_samples = gr.Slider(label="Images", minimum=1, maximum=12, value=2, step=1)
-                    blend_value = gr.Slider(label="blend_value", minimum=0.0, maximum=1.0, value=0.4, step=0.1)
                     seed = gr.Number(label="Seed", value=4342, precision=0)
-                # with gr.Row():
-                #     image_width = gr.Slider(label="Image Width", minimum=256, maximum=1024, value=512, step=64)
-                #     image_height = gr.Slider(label="Image Height", minimum=256, maximum=1024, value=640, step=64)
-
+                    blend_value_fg = gr.Slider(label="blend_value_fg", minimum=0.0, maximum=1.0, value=0.6, step=0.1)
+                    blend_value_bg = gr.Slider(label="blend_value_bg", minimum=0.0, maximum=1.0, value=0.4, step=0.1)
+                    
             with gr.Accordion("Advanced options", open=False):
                 steps = gr.Slider(label="Steps", minimum=1, maximum=100, value=20, step=1)
                 cfg = gr.Slider(label="CFG Scale", minimum=1.0, maximum=32.0, value=7.0, step=0.01)
@@ -468,9 +416,8 @@ with block:
             result_gallery = gr.Gallery(height=832, object_fit='contain', label='Outputs')
     
     ips = [input_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt, n_prompt, 
-           cfg, highres_scale, highres_denoise, bg_source, blend_value]
+           cfg, highres_scale, highres_denoise, bg_source, blend_value_fg, blend_value_bg]
     relight_button.click(fn=process_relight, inputs=ips, outputs=[result_gallery])
-    # normal_button.click(fn=process_normal, inputs=ips, outputs=[result_gallery])
     example_prompts.click(lambda x: x[0], inputs=example_prompts, outputs=prompt, show_progress=False, queue=False)
 
     def bg_gallery_selected(gal, evt: gr.SelectData):

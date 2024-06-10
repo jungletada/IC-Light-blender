@@ -96,40 +96,37 @@ def mask_to_binary(mask, rgb_dim=True):
     return binary_array
         
 
-def blend_ic_light(mask, resized_fg, ic_results, threshold):
+def blend_ic_light(mask, resized_fg, ic_results, blend_value=0.4):
     blended_ic_results = []
     for i, ic_res in enumerate(ic_results):
         diff = ((ic_res - resized_fg) * mask).astype(np.uint8)
         min_diff, max_diff = np.min(diff, axis=(0,1)), np.max(diff, axis=(0,1))
         weight_ic_fg = (diff - min_diff) / (max_diff - min_diff + 1e-6)
-        weight_ic_fg[weight_ic_fg > threshold] = threshold
+        weight_ic_fg[weight_ic_fg > blend_value] = blend_value
         weight_fg = 1 - weight_ic_fg
         
-        # 计算混合后的图像
         blended = (ic_res * weight_ic_fg + resized_fg * weight_fg).astype(np.uint8)
         ic_res[mask==1] = blended[mask==1]
         blended_ic_results.append(ic_res)
-        # cv2_save_rgb(f'results/ic_{i}.jpg', oringin_ic.astype(np.uint8))
-        # cv2_save_rgb(f'results/blend_{i}.jpg', ic_fg.astype(np.uint8))
+        
     return blended_ic_results
 
 
-def blend_ic_light_bg(mask, resized_fg, resized_bg, ic_results, threshold):
+def blend_ic_light_bg(mask, resized_fg, resized_bg, ic_results, blend_value_fg=0.9, blend_value_bg=0.4):
     blended_ic_results = []
     for i, ic_res in enumerate(ic_results):
         diff = ((ic_res - resized_fg) * mask).astype(np.uint8)
         min_diff, max_diff = np.min(diff, axis=(0,1)), np.max(diff, axis=(0,1))
         weight_ic_fg = (diff - min_diff) / (max_diff - min_diff + 1e-6)
-        weight_ic_fg[weight_ic_fg > threshold] = threshold
+        weight_ic_fg[weight_ic_fg > blend_value_fg] = blend_value_fg
         weight_fg = 1 - weight_ic_fg
         
         diff = ((ic_res - resized_bg) * (1 - mask)).astype(np.uint8)
         min_diff, max_diff = np.min(diff, axis=(0,1)), np.max(diff, axis=(0,1))
         weight_ic_bg = (diff - min_diff) / (max_diff - min_diff + 1e-6)
-        weight_ic_bg[weight_ic_bg > threshold] = threshold
+        weight_ic_bg[weight_ic_bg > blend_value_bg] = blend_value_bg
         weight_bg = 1 - weight_ic_bg
-        
-        # 计算混合后的图像
+
         blended_fg = (ic_res * weight_ic_fg + resized_fg * weight_fg).astype(np.uint8)
         blended_bg = (ic_res * weight_ic_bg + resized_bg * weight_bg).astype(np.uint8)
         ic_res = blended_fg * mask + blended_bg * (1 - mask)
