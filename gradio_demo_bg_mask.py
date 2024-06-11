@@ -14,7 +14,8 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from briarmbg import BriaRMBG
 from enum import Enum
 from torch.hub import download_url_to_file
-import utils_img
+from utils import numpy2pytorch, pytorch2numpy
+import utils
 
 # 'stablediffusionapi/realistic-vision-v51'
 # 'runwayml/stable-diffusion-v1-5'
@@ -235,10 +236,10 @@ def run_process_alpha(img, mask, sigma=0.0):
 def process(input_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt, n_prompt, 
             cfg, highres_scale, highres_denoise, bg_source):
     
-    fg = utils_img.cv2_resize_img_aspect(input_fg)
-    mask = utils_img.cv2_resize_img_aspect(mask)
+    fg = utils.cv2_resize_img_aspect(input_fg)
+    mask = utils.cv2_resize_img_aspect(mask)
     image_width, image_height = fg.shape[:2]
-    bg = utils_img.cv2_resize_img(input_bg, image_width, image_height)
+    bg = utils.cv2_resize_img(input_bg, image_width, image_height)
     
     bg_source = BGSource(bg_source)
     
@@ -310,9 +311,9 @@ def process(input_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt
     # bg = resize_and_center_crop(input_bg, image_width, image_height)
     # mask = resize_without_crop(mask, image_width, image_height)
     
-    fg = utils_img.cv2_resize_img(fg, image_width, image_height)
-    bg = utils_img.cv2_resize_img(bg, image_width, image_height)
-    mask = utils_img.cv2_resize_img(mask, image_width, image_height)
+    fg = utils.cv2_resize_img(fg, image_width, image_height)
+    bg = utils.cv2_resize_img(bg, image_width, image_height)
+    mask = utils.cv2_resize_img(mask, image_width, image_height)
     
     concat_conds = numpy2pytorch([fg, bg]).to(device=vae.device, dtype=vae.dtype)
     concat_conds = vae.encode(concat_conds).latent_dist.mode() * vae.config.scaling_factor
@@ -342,13 +343,13 @@ def process(input_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt
 @torch.inference_mode()
 def process_relight(input_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt, n_prompt, cfg, 
                     highres_scale, highres_denoise, bg_source, blend_value_fg, blend_value_bg):
-    mask = utils_img.mask_to_binary(mask)
+    mask = utils.mask_to_binary(mask)
     fuse_fg = run_process_alpha(input_fg, mask, sigma=0.0)
     results, fg, mask, bg = process(
         fuse_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt, n_prompt, 
         cfg, highres_scale, highres_denoise, bg_source)
     results = [(x * 255.0).clip(0, 255).astype(np.uint8) for x in results]
-    blend_results = utils_img.blend_ic_light_bg(mask, fg, bg, results, blend_value_fg=blend_value_fg, blend_value_bg=blend_value_bg)
+    blend_results = utils.blend_ic_light_bg(mask, fg, bg, results, blend_value_fg=blend_value_fg, blend_value_bg=blend_value_bg)
     return blend_results
 
 

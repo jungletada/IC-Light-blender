@@ -16,7 +16,8 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from briarmbg import BriaRMBG
 from enum import Enum
 from torch.hub import download_url_to_file
-import utils_img
+from utils import numpy2pytorch, pytorch2numpy
+import utils
 
 
 sd15_name = 'stablediffusionapi/realistic-vision-v51'
@@ -61,7 +62,6 @@ unet.load_state_dict(sd_merged, strict=True)
 del sd_offset, sd_origin, sd_merged, keys
 
 # Device
-
 device = torch.device('cuda')
 text_encoder = text_encoder.to(device=device, dtype=torch.float16)
 vae = vae.to(device=device, dtype=torch.bfloat16)
@@ -69,7 +69,6 @@ unet = unet.to(device=device, dtype=torch.float16)
 rmbg = rmbg.to(device=device, dtype=torch.float32)
 
 # SDP
-
 unet.set_attn_processor(AttnProcessor2_0())
 vae.set_attn_processor(AttnProcessor2_0())
 
@@ -102,7 +101,6 @@ dpmpp_2m_sde_karras_scheduler = DPMSolverMultistepScheduler(
 )
 
 # Pipelines
-
 t2i_pipe = StableDiffusionPipeline(
     vae=vae,
     text_encoder=text_encoder,
@@ -246,8 +244,8 @@ def run_process_alpha(img, mask, sigma=0.0):
 @torch.inference_mode()
 def process(input_fg, mask, prompt, num_samples, seed, steps, 
             a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source):
-    fg = utils_img.cv2_resize_img_aspect(input_fg)
-    mask = utils_img.cv2_resize_img_aspect(mask)
+    fg = utils.cv2_resize_img_aspect(input_fg)
+    mask = utils.cv2_resize_img_aspect(mask)
     fg = input_fg
     image_height, image_width = fg.shape[:2]
     
@@ -295,7 +293,7 @@ def process(input_fg, mask, prompt, num_samples, seed, steps,
         ).images.to(vae.dtype) / vae.config.scaling_factor
     else:
         # bg = resize_and_center_crop(input_bg, image_width, image_height)
-        bg = utils_img.cv2_resize_img(input_bg, image_width, image_height)
+        bg = utils.cv2_resize_img(input_bg, image_width, image_height)
         bg_latent = numpy2pytorch([bg]).to(device=vae.device, dtype=vae.dtype)
         bg_latent = vae.encode(bg_latent).latent_dist.mode() * vae.config.scaling_factor
         latents = i2i_pipe(
@@ -317,18 +315,18 @@ def process(input_fg, mask, prompt, num_samples, seed, steps,
     pixels = vae.decode(latents).sample 
     pixels = pytorch2numpy(pixels)
     rw, rh = int(round(image_width * highres_scale / 64.0) * 64), int(round(image_height * highres_scale / 64.0) * 64)
-    pixels = [utils_img.cv2_resize_img(p, new_w=rw, new_h=rh)
+    pixels = [utils.cv2_resize_img(p, new_w=rw, new_h=rh)
     for p in pixels]
     
     # utils.cv2_save_rgb('results/pixel_bg.jpg', pixels[0])
-    mask = utils_img.cv2_resize_img(mask, new_w=rw, new_h=rh)
+    mask = utils.cv2_resize_img(mask, new_w=rw, new_h=rh)
     
     pixels = numpy2pytorch(pixels).to(device=vae.device, dtype=vae.dtype)
     latents = vae.encode(pixels).latent_dist.mode() * vae.config.scaling_factor
     latents = latents.to(device=unet.device, dtype=unet.dtype)
 
     image_height, image_width = latents.shape[2] * 8, latents.shape[3] * 8
-    fg = utils_img.cv2_resize_img(fg, image_width, image_height)
+    fg = utils.cv2_resize_img(fg, image_width, image_height)
     concat_conds = numpy2pytorch([fg]).to(device=vae.device, dtype=vae.dtype)
     concat_conds = vae.encode(concat_conds).latent_dist.mode() * vae.config.scaling_factor
 
@@ -363,9 +361,9 @@ def process_relight(input_fg, prompt, num_samples, seed, steps,
         fuse_fg, mask, prompt, num_samples, seed, steps, 
             a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source)
     mask = mask.astype(np.uint8)
-    utils_img.cv2_save_rgb(osp.join('results','mask.png'), (mask * 255).astype(np.uint8)) 
-    blend_results = utils_img.blend_ic_light(mask, fg, results, blend_value=blend_value)
-    utils_img.cv2_save_rgb(osp.join('results','fuse_fg.jpg'), fuse_fg)
+    utils.cv2_save_rgb(osp.join('results','mask.png'), (mask * 255).astype(np.uint8)) 
+    blend_results = utils.blend_ic_light(mask, fg, results, blend_value=blend_value)
+    utils.cv2_save_rgb(osp.join('results','fuse_fg.jpg'), fuse_fg)
     return fuse_fg, blend_results
 
 

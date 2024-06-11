@@ -69,8 +69,26 @@ def cv2_resize_img_aspect(img, max_size=960, pad_to_64=True):
     return img
 
 
-def cv2_resize_img(img, new_w, new_h):
-    img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+def cv2_resize_and_crop_bg(image, new_h, new_w):
+    h, w = image.shape[:2]
+    original_aspect = w / h
+    target_aspect = new_w / new_h
+
+    if original_aspect > target_aspect:
+        new_width = int(h * target_aspect)
+        offset = (w - new_width) // 2
+        cropped_image = image[:, offset:offset + new_width]
+    else:
+        new_height = int(w / target_aspect)
+        offset = (h - new_height) // 2
+        cropped_image = image[offset:offset + new_height, :]
+    
+    resized_image = cv2.resize(cropped_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    return resized_image
+
+
+def cv2_resize_img(img, new_h, new_w):
+    img = cv2.resize(img, (new_h, new_w), interpolation=cv2.INTER_AREA)
     return img
     
     
