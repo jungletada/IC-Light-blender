@@ -166,66 +166,6 @@ def encode_prompt_pair(positive_prompt, negative_prompt):
     return c, uc
 
 
-@torch.inference_mode()
-def pytorch2numpy(imgs, quant=True):
-    results = []
-    for x in imgs:
-        y = x.movedim(0, -1)
-
-        if quant:
-            y = y * 127.5 + 127.5
-            y = y.detach().float().cpu().numpy().clip(0, 255).astype(np.uint8)
-        else:
-            y = y * 0.5 + 0.5
-            y = y.detach().float().cpu().numpy().clip(0, 1).astype(np.float32)
-
-        results.append(y)
-    return results
-
-
-@torch.inference_mode()
-def numpy2pytorch(imgs):
-    h = torch.from_numpy(np.stack(imgs, axis=0)).float() / 127.0 - 1.0  # so that 127 must be strictly 0.0
-    h = h.movedim(-1, 1)
-    return h
-
-
-def resize_and_center_crop(image, target_width, target_height):
-    pil_image = Image.fromarray(image)
-    original_width, original_height = pil_image.size
-    scale_factor = max(target_width / original_width, target_height / original_height)
-    resized_width = int(round(original_width * scale_factor))
-    resized_height = int(round(original_height * scale_factor))
-    resized_image = pil_image.resize((resized_width, resized_height), Image.LANCZOS)
-    left = (resized_width - target_width) / 2
-    top = (resized_height - target_height) / 2
-    right = (resized_width + target_width) / 2
-    bottom = (resized_height + target_height) / 2
-    cropped_image = resized_image.crop((left, top, right, bottom))
-    return np.array(cropped_image)
-
-
-def resize_without_crop(image, target_width, target_height):
-    pil_image = Image.fromarray(image)
-    resized_image = pil_image.resize((target_width, target_height), Image.LANCZOS)
-    return np.array(resized_image)
-
-
-# @torch.inference_mode()
-# def run_rmbg(img, sigma=0.0):
-#     H, W, C = img.shape
-#     assert C == 3
-#     k = (256.0 / float(H * W)) ** 0.5
-#     feed = resize_without_crop(img, int(64 * round(W * k)), int(64 * round(H * k)))
-#     feed = numpy2pytorch([feed]).to(device=device, dtype=torch.float32)
-#     alpha = rmbg(feed)[0][0]
-#     alpha = torch.nn.functional.interpolate(alpha, size=(H, W), mode="bilinear")
-#     alpha = alpha.movedim(1, -1)[0]
-#     alpha = alpha.detach().float().cpu().numpy().clip(0, 1)
-#     result = 127 + (img.astype(np.float32) - 127 + sigma) * alpha
-#     return result.clip(0, 255).astype(np.uint8), alpha
-
-
 def run_process_alpha(img, mask, sigma=0.0):
     result = 127 + (img.astype(np.float32) - 127 + sigma) * mask
     result = result.clip(0, 255).astype(np.uint8) # result背景部分变成灰色
@@ -239,7 +179,7 @@ def process(input_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt
     fg = utils.cv2_resize_img_aspect(input_fg)
     mask = utils.cv2_resize_img_aspect(mask)
     image_width, image_height = fg.shape[:2]
-    bg = utils.cv2_resize_img(input_bg, image_width, image_height)
+    bg = utils.cv2_resize_img(input_bg, image_height, image_width)
     
     bg_source = BGSource(bg_source)
     
@@ -270,9 +210,6 @@ def process(input_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt
 
     rng = torch.Generator(device=device).manual_seed(seed)
 
-    # fg = resize_and_center_crop(input_fg, image_width, image_height)
-    # bg = resize_and_center_crop(input_bg, image_width, image_height)
-    # mask = resize_and_center_crop(mask, image_width, image_height)
     
     concat_conds = numpy2pytorch([fg, bg]).to(device=vae.device, dtype=vae.dtype)
     concat_conds = vae.encode(concat_conds).latent_dist.mode() * vae.config.scaling_factor
@@ -295,10 +232,10 @@ def process(input_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt
 
     pixels = vae.decode(latents).sample
     pixels = pytorch2numpy(pixels)
-    pixels = [resize_without_crop(
-        image=p,
-        target_width=int(round(image_width * highres_scale / 64.0) * 64),
-        target_height=int(round(image_height * highres_scale / 64.0) * 64))
+    pixels = [utils.cv2_resize_img(
+        p,
+        int(round(image_height * highres_scale / 64.0) * 64),
+        int(round(image_width * highres_scale / 64.0) * 64))
     for p in pixels]
 
     pixels = numpy2pytorch(pixels).to(device=vae.device, dtype=vae.dtype)
@@ -307,13 +244,10 @@ def process(input_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt
 
     image_height, image_width = latents.shape[2] * 8, latents.shape[3] * 8
     
-    # fg = resize_and_center_crop(input_fg, image_width, image_height)
-    # bg = resize_and_center_crop(input_bg, image_width, image_height)
-    # mask = resize_without_crop(mask, image_width, image_height)
     
-    fg = utils.cv2_resize_img(fg, image_width, image_height)
-    bg = utils.cv2_resize_img(bg, image_width, image_height)
-    mask = utils.cv2_resize_img(mask, image_width, image_height)
+    fg = utils.cv2_resize_img(fg, image_height, image_width)
+    bg = utils.cv2_resize_img(bg, image_height, image_width)
+    mask = utils.cv2_resize_img(mask, image_height, image_width)
     
     concat_conds = numpy2pytorch([fg, bg]).to(device=vae.device, dtype=vae.dtype)
     concat_conds = vae.encode(concat_conds).latent_dist.mode() * vae.config.scaling_factor

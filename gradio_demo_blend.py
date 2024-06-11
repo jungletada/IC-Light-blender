@@ -168,30 +168,6 @@ def encode_prompt_pair(positive_prompt, negative_prompt):
     return c, uc
 
 
-@torch.inference_mode()
-def pytorch2numpy(imgs, quant=True):
-    results = []
-    for x in imgs:
-        y = x.movedim(0, -1)
-
-        if quant:
-            y = y * 127.5 + 127.5
-            y = y.detach().float().cpu().numpy().clip(0, 255).astype(np.uint8)
-        else:
-            y = y * 0.5 + 0.5
-            y = y.detach().float().cpu().numpy().clip(0, 1).astype(np.float32)
-
-        results.append(y)
-    return results
-
-
-@torch.inference_mode()
-def numpy2pytorch(imgs):
-    h = torch.from_numpy(np.stack(imgs, axis=0)).float() / 127.0 - 1.0  # so that 127 must be strictly 0.0
-    h = h.movedim(-1, 1)
-    return h
-
-
 def resize_and_center_crop(image, target_width, target_height):
     pil_image = Image.fromarray(image)
     original_width, original_height = pil_image.size
