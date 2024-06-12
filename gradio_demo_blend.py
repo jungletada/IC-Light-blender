@@ -16,6 +16,7 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from briarmbg import BriaRMBG
 from enum import Enum
 from torch.hub import download_url_to_file
+from utils import numpy2pytorch, pytorch2numpy
 import utils
 
 
@@ -61,7 +62,6 @@ unet.load_state_dict(sd_merged, strict=True)
 del sd_offset, sd_origin, sd_merged, keys
 
 # Device
-
 device = torch.device('cuda')
 text_encoder = text_encoder.to(device=device, dtype=torch.float16)
 vae = vae.to(device=device, dtype=torch.bfloat16)
@@ -69,7 +69,6 @@ unet = unet.to(device=device, dtype=torch.float16)
 rmbg = rmbg.to(device=device, dtype=torch.float32)
 
 # SDP
-
 unet.set_attn_processor(AttnProcessor2_0())
 vae.set_attn_processor(AttnProcessor2_0())
 
@@ -102,7 +101,6 @@ dpmpp_2m_sde_karras_scheduler = DPMSolverMultistepScheduler(
 )
 
 # Pipelines
-
 t2i_pipe = StableDiffusionPipeline(
     vae=vae,
     text_encoder=text_encoder,
@@ -168,30 +166,6 @@ def encode_prompt_pair(positive_prompt, negative_prompt):
     uc = torch.cat([p[None, ...] for p in uc], dim=1)
 
     return c, uc
-
-
-@torch.inference_mode()
-def pytorch2numpy(imgs, quant=True):
-    results = []
-    for x in imgs:
-        y = x.movedim(0, -1)
-
-        if quant:
-            y = y * 127.5 + 127.5
-            y = y.detach().float().cpu().numpy().clip(0, 255).astype(np.uint8)
-        else:
-            y = y * 0.5 + 0.5
-            y = y.detach().float().cpu().numpy().clip(0, 1).astype(np.float32)
-
-        results.append(y)
-    return results
-
-
-@torch.inference_mode()
-def numpy2pytorch(imgs):
-    h = torch.from_numpy(np.stack(imgs, axis=0)).float() / 127.0 - 1.0  # so that 127 must be strictly 0.0
-    h = h.movedim(-1, 1)
-    return h
 
 
 def resize_and_center_crop(image, target_width, target_height):
@@ -364,7 +338,7 @@ def process_relight(input_fg, prompt, num_samples, seed, steps,
             a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source)
     mask = mask.astype(np.uint8)
     utils.cv2_save_rgb(osp.join('results','mask.png'), (mask * 255).astype(np.uint8)) 
-    blend_results = utils.blend_ic_light(mask, fg, results, threshold=blend_value)
+    blend_results = utils.blend_ic_light(mask, fg, results, blend_value=blend_value)
     utils.cv2_save_rgb(osp.join('results','fuse_fg.jpg'), fuse_fg)
     return fuse_fg, blend_results
 

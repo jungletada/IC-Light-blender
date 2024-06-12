@@ -14,7 +14,9 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from briarmbg import BriaRMBG
 from enum import Enum
 from torch.hub import download_url_to_file
+from utils import numpy2pytorch, pytorch2numpy
 import utils
+
 
 # 'stablediffusionapi/realistic-vision-v51'
 # 'runwayml/stable-diffusion-v1-5'
@@ -52,6 +54,7 @@ model_path = './models/iclight_sd15_fbc.safetensors'
 
 if not os.path.exists(model_path):
     download_url_to_file(url='https://huggingface.co/lllyasviel/ic-light/resolve/main/iclight_sd15_fbc.safetensors', dst=model_path)
+
 
 sd_offset = sf.load_file(model_path)
 sd_origin = unet.state_dict()
@@ -167,56 +170,11 @@ def encode_prompt_pair(positive_prompt, negative_prompt):
 
 
 @torch.inference_mode()
-def pytorch2numpy(imgs, quant=True):
-    results = []
-    for x in imgs:
-        y = x.movedim(0, -1)
-
-        if quant:
-            y = y * 127.5 + 127.5
-            y = y.detach().float().cpu().numpy().clip(0, 255).astype(np.uint8)
-        else:
-            y = y * 0.5 + 0.5
-            y = y.detach().float().cpu().numpy().clip(0, 1).astype(np.float32)
-
-        results.append(y)
-    return results
-
-
-@torch.inference_mode()
-def numpy2pytorch(imgs):
-    h = torch.from_numpy(np.stack(imgs, axis=0)).float() / 127.0 - 1.0  # so that 127 must be strictly 0.0
-    h = h.movedim(-1, 1)
-    return h
-
-
-def resize_and_center_crop(image, target_width, target_height):
-    pil_image = Image.fromarray(image)
-    original_width, original_height = pil_image.size
-    scale_factor = max(target_width / original_width, target_height / original_height)
-    resized_width = int(round(original_width * scale_factor))
-    resized_height = int(round(original_height * scale_factor))
-    resized_image = pil_image.resize((resized_width, resized_height), Image.LANCZOS)
-    left = (resized_width - target_width) / 2
-    top = (resized_height - target_height) / 2
-    right = (resized_width + target_width) / 2
-    bottom = (resized_height + target_height) / 2
-    cropped_image = resized_image.crop((left, top, right, bottom))
-    return np.array(cropped_image)
-
-
-def resize_without_crop(image, target_width, target_height):
-    pil_image = Image.fromarray(image)
-    resized_image = pil_image.resize((target_width, target_height), Image.LANCZOS)
-    return np.array(resized_image)
-
-
-@torch.inference_mode()
 def run_rmbg(img, sigma=0.0):
     H, W, C = img.shape
     assert C == 3
     k = (256.0 / float(H * W)) ** 0.5
-    feed = resize_without_crop(img, int(64 * round(W * k)), int(64 * round(H * k)))
+    feed = utils.cv2_resize_img(img, int(64 * round(H * k), int(64 * round(W * k))))
     feed = numpy2pytorch([feed]).to(device=device, dtype=torch.float32)
     alpha = rmbg(feed)[0][0]
     alpha = torch.nn.functional.interpolate(alpha, size=(H, W), mode="bilinear")
@@ -229,7 +187,7 @@ def run_rmbg(img, sigma=0.0):
 
 
 @torch.inference_mode()
-def process(input_fg, input_bg, mask, prompt, i_width, i_height, num_samples, seed, steps, a_prompt, n_prompt, 
+def process(input_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt, n_prompt, 
             cfg, highres_scale, highres_denoise, bg_source):
     
     fg = utils.cv2_resize_img_aspect(input_fg)
@@ -287,9 +245,7 @@ def process(input_fg, input_bg, mask, prompt, i_width, i_height, num_samples, se
     pixels = vae.decode(latents).sample
     pixels = pytorch2numpy(pixels)
     pixels = [utils.cv2_resize_img(
-        p,
-        int(round(image_width * highres_scale / 64.0) * 64),
-        int(round(image_height * highres_scale / 64.0) * 64))
+        p, int(round(image_height * highres_scale / 64.0) * 64),int(round(image_width * highres_scale / 64.0) * 64))
     for p in pixels]
 
     pixels = numpy2pytorch(pixels).to(device=vae.device, dtype=vae.dtype)
@@ -297,12 +253,11 @@ def process(input_fg, input_bg, mask, prompt, i_width, i_height, num_samples, se
     latents = latents.to(device=unet.device, dtype=unet.dtype)
 
     image_height, image_width = latents.shape[2] * 8, latents.shape[3] * 8
-    # fg = resize_and_center_crop(input_fg, image_width, image_height)
-    # bg = resize_and_center_crop(input_bg, image_width, image_height)
-        
-    fg = utils.cv2_resize_img(fg, image_width, image_height)
-    bg = utils.cv2_resize_img(bg, image_width, image_height)
-    mask = utils.cv2_resize_img(mask, image_width, image_height)
+    
+    fg = utils.cv2_resize_img(fg, image_height, image_width)
+    bg = utils.cv2_resize_img(bg, image_height, image_width)
+    mask = utils.cv2_resize_img(mask, image_height, image_width)
+    
     concat_conds = numpy2pytorch([fg, bg]).to(device=vae.device, dtype=vae.dtype)
     concat_conds = vae.encode(concat_conds).latent_dist.mode() * vae.config.scaling_factor
     concat_conds = torch.cat([c[None, ...] for c in concat_conds], dim=1)
@@ -329,64 +284,16 @@ def process(input_fg, input_bg, mask, prompt, i_width, i_height, num_samples, se
 
 
 @torch.inference_mode()
-def process_relight(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, 
-                    cfg, highres_scale, highres_denoise, bg_source):
+def process_relight(input_fg, input_bg, prompt, num_samples, seed, steps, a_prompt, n_prompt, 
+                    cfg, highres_scale, highres_denoise, bg_source, blend_value_fg, blend_value_bg):
     input_fg, mask = run_rmbg(input_fg) # H, W
-    results, fg, mask, bg = process(input_fg, input_bg, mask, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, 
+    mask = mask.repeat(3, axis=2)
+    results, fg, mask, bg = process(input_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt, n_prompt, 
                     cfg, highres_scale, highres_denoise, bg_source)
     results = [(x * 255.0).clip(0, 255).astype(np.uint8) for x in results]
     mask = mask[...,np.newaxis].repeat(3, axis=2)
     blend_results = utils.blend_ic_light_bg(mask, fg, bg, results, threshold=0.4)
     return blend_results
-
-
-@torch.inference_mode()
-def process_normal(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source):
-    input_fg, matting = run_rmbg(input_fg, sigma=16)
-
-    print('left ...')
-    left = process(input_fg, input_bg, prompt, image_width, image_height, 1, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, BGSource.LEFT.value)[0][0]
-
-    print('right ...')
-    right = process(input_fg, input_bg, prompt, image_width, image_height, 1, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, BGSource.RIGHT.value)[0][0]
-
-    print('bottom ...')
-    bottom = process(input_fg, input_bg, prompt, image_width, image_height, 1, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, BGSource.BOTTOM.value)[0][0]
-
-    print('top ...')
-    top = process(input_fg, input_bg, prompt, image_width, image_height, 1, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, BGSource.TOP.value)[0][0]
-
-    inner_results = [left * 2.0 - 1.0, right * 2.0 - 1.0, bottom * 2.0 - 1.0, top * 2.0 - 1.0]
-
-    ambient = (left + right + bottom + top) / 4.0
-    h, w, _ = ambient.shape
-    matting = resize_and_center_crop((matting[..., 0] * 255.0).clip(0, 255).astype(np.uint8), w, h).astype(np.float32)[..., None] / 255.0
-
-    def safa_divide(a, b):
-        e = 1e-5
-        return ((a + e) / (b + e)) - 1.0
-
-    left = safa_divide(left, ambient)
-    right = safa_divide(right, ambient)
-    bottom = safa_divide(bottom, ambient)
-    top = safa_divide(top, ambient)
-
-    u = (right - left) * 0.5
-    v = (top - bottom) * 0.5
-
-    sigma = 10.0
-    u = np.mean(u, axis=2)
-    v = np.mean(v, axis=2)
-    h = (1.0 - u ** 2.0 - v ** 2.0).clip(0, 1e5) ** (0.5 * sigma)
-    z = np.zeros_like(h)
-
-    normal = np.stack([u, v, h], axis=2)
-    normal /= np.sum(normal ** 2.0, axis=2, keepdims=True) ** 0.5
-    normal = normal * matting + np.stack([z, z, 1 - z], axis=2) * (1 - matting)
-
-    results = [normal, left, right, bottom, top] + inner_results
-    results = [(x * 127.5 + 127.5).clip(0, 255).astype(np.uint8) for x in results]
-    return results
 
 
 quick_prompts = [
@@ -432,37 +339,25 @@ with block:
 
             with gr.Group():
                 with gr.Row():
-                    num_samples = gr.Slider(label="Images", minimum=1, maximum=12, value=1, step=1)
+                    num_samples = gr.Slider(label="Images", minimum=1, maximum=12, value=2, step=1)
                     seed = gr.Number(label="Seed", value=12345, precision=0)
-                with gr.Row():
-                    image_width = gr.Slider(label="Image Width", minimum=256, maximum=1024, value=512, step=64)
-                    image_height = gr.Slider(label="Image Height", minimum=256, maximum=1024, value=640, step=64)
-
+                    blend_value_fg = gr.Slider(label="blend_value_fg", minimum=0.0, maximum=1.0, value=0.6, step=0.1)
+                    blend_value_bg = gr.Slider(label="blend_value_bg", minimum=0.0, maximum=1.0, value=0.4, step=0.1)
+                     
             with gr.Accordion("Advanced options", open=False):
                 steps = gr.Slider(label="Steps", minimum=1, maximum=100, value=20, step=1)
                 cfg = gr.Slider(label="CFG Scale", minimum=1.0, maximum=32.0, value=7.0, step=0.01)
-                highres_scale = gr.Slider(label="Highres Scale", minimum=1.0, maximum=3.0, value=1.5, step=0.01)
+                highres_scale = gr.Slider(label="Highres Scale", minimum=1.0, maximum=3.0, value=1.0, step=0.01)
                 highres_denoise = gr.Slider(label="Highres Denoise", minimum=0.1, maximum=0.9, value=0.5, step=0.01)
                 a_prompt = gr.Textbox(label="Added Prompt", value='best quality')
                 n_prompt = gr.Textbox(label="Negative Prompt",
                                       value='lowres, bad anatomy, bad hands, cropped, worst quality')
-                normal_button = gr.Button(value="Compute Normal (4x Slower)")
         with gr.Column():
             result_gallery = gr.Gallery(height=832, object_fit='contain', label='Outputs')
-    # with gr.Row():
-    #     dummy_image_for_outputs = gr.Image(visible=False, label='Result')
-    #     gr.Examples(
-    #         fn=lambda *args: [args[-1]],
-    #         examples=db_examples.background_conditioned_examples,
-    #         inputs=[
-    #             input_fg, input_bg, prompt, bg_source, image_width, image_height, seed, dummy_image_for_outputs
-    #         ],
-    #         outputs=[result_gallery],
-    #         run_on_click=True, examples_per_page=1024
-    #     )
-    ips = [input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, cfg, highres_scale, highres_denoise, bg_source]
+    
+    ips = [input_fg, input_bg, prompt, num_samples, seed, steps, a_prompt, n_prompt, cfg, 
+           highres_scale, highres_denoise, bg_source, blend_value_fg, blend_value_bg]
     relight_button.click(fn=process_relight, inputs=ips, outputs=[result_gallery])
-    normal_button.click(fn=process_normal, inputs=ips, outputs=[result_gallery])
     example_prompts.click(lambda x: x[0], inputs=example_prompts, outputs=prompt, show_progress=False, queue=False)
 
     def bg_gallery_selected(gal, evt: gr.SelectData):
