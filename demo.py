@@ -6,7 +6,6 @@ import numpy as np
 import torch
 import safetensors.torch as sf
 
-from PIL import Image
 from diffusers import StableDiffusionPipeline, StableDiffusionImg2ImgPipeline
 from diffusers import AutoencoderKL, UNet2DConditionModel, DDIMScheduler, EulerAncestralDiscreteScheduler, DPMSolverMultistepScheduler
 from diffusers.models.attention_processor import AttnProcessor2_0
@@ -205,6 +204,113 @@ def run_rmbg(img, sigma=0.0):
     alpha[alpha >= 0.97] = 1
     result = 127 + (img.astype(np.float32) - 127 + sigma) * alpha
     return result.clip(0, 255).astype(np.uint8), alpha
+
+
+@torch.inference_mode()
+def process_bgen(input_fg, mask, prompt, num_samples, seed, steps, 
+            a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source):
+    fg = utils.cv2_resize_img_aspect(input_fg)
+    mask = utils.cv2_resize_img_aspect(mask)
+    # fg = input_fg
+    image_height, image_width = fg.shape[:2]
+    
+    bg_source = BGSource(bg_source)
+    input_bg = None
+    if bg_source == BGSource.NONE:
+        pass
+    elif bg_source == BGSource.LEFT:
+        gradient = np.linspace(255, 0, image_width)
+        image = np.tile(gradient, (image_height, 1))
+        input_bg = np.stack((image,) * 3, axis=-1).astype(np.uint8)
+    elif bg_source == BGSource.RIGHT:
+        gradient = np.linspace(0, 255, image_width)
+        image = np.tile(gradient, (image_height, 1))
+        input_bg = np.stack((image,) * 3, axis=-1).astype(np.uint8)
+    elif bg_source == BGSource.TOP:
+        gradient = np.linspace(255, 0, image_height)[:, None]
+        image = np.tile(gradient, (1, image_width))
+        input_bg = np.stack((image,) * 3, axis=-1).astype(np.uint8)
+    elif bg_source == BGSource.BOTTOM:
+        gradient = np.linspace(0, 255, image_height)[:, None]
+        image = np.tile(gradient, (1, image_width))
+        input_bg = np.stack((image,) * 3, axis=-1).astype(np.uint8)
+    else:
+        raise 'Wrong initial latent!'
+
+    rng = torch.Generator(device=device).manual_seed(int(seed))
+    concat_conds = numpy2pytorch([fg]).to(device=vae.device, dtype=vae.dtype)
+    concat_conds = vae.encode(concat_conds).latent_dist.mode() * vae.config.scaling_factor
+
+    conds, unconds = encode_prompt_pair(positive_prompt=prompt + ', ' + a_prompt, negative_prompt=n_prompt)
+
+    if input_bg is None:
+        latents = t2i_pipe(
+            prompt_embeds=conds,
+            negative_prompt_embeds=unconds,
+            width=image_width,
+            height=image_height,
+            num_inference_steps=steps,
+            num_images_per_prompt=num_samples,
+            generator=rng,
+            output_type='latent',
+            guidance_scale=cfg,
+            cross_attention_kwargs={'concat_conds': concat_conds},
+        ).images.to(vae.dtype) / vae.config.scaling_factor
+    else:
+        bg = utils.cv2_resize_img(input_bg, image_width, image_height)
+        bg_latent = numpy2pytorch([bg]).to(device=vae.device, dtype=vae.dtype)
+        bg_latent = vae.encode(bg_latent).latent_dist.mode() * vae.config.scaling_factor
+        latents = i2i_pipe(
+            image=bg_latent,
+            strength=lowres_denoise,
+            prompt_embeds=conds,
+            negative_prompt_embeds=unconds,
+            width=image_width,
+            height=image_height,
+            num_inference_steps=int(round(steps / lowres_denoise)),
+            num_images_per_prompt=num_samples,
+            generator=rng,
+            output_type='latent',
+            guidance_scale=cfg,
+            cross_attention_kwargs={'concat_conds': concat_conds},
+        ).images.to(vae.dtype) / vae.config.scaling_factor
+    
+    # vae decode
+    pixels = vae.decode(latents).sample 
+    pixels = pytorch2numpy(pixels)
+    rw, rh = int(round(image_width * highres_scale / 64.0) * 64), int(round(image_height * highres_scale / 64.0) * 64)
+    pixels = [utils.cv2_resize_img(p, new_w=rw, new_h=rh)
+    for p in pixels]
+    
+    mask = utils.cv2_resize_img(mask, new_w=rw, new_h=rh)
+    
+    pixels = numpy2pytorch(pixels).to(device=vae.device, dtype=vae.dtype)
+    latents = vae.encode(pixels).latent_dist.mode() * vae.config.scaling_factor
+    latents = latents.to(device=unet.device, dtype=unet.dtype)
+
+    image_height, image_width = latents.shape[2] * 8, latents.shape[3] * 8
+    fg = utils.cv2_resize_img(fg, image_width, image_height)
+    concat_conds = numpy2pytorch([fg]).to(device=vae.device, dtype=vae.dtype)
+    concat_conds = vae.encode(concat_conds).latent_dist.mode() * vae.config.scaling_factor
+
+    latents = i2i_pipe(
+        image=latents,
+        strength=highres_denoise,
+        prompt_embeds=conds,
+        negative_prompt_embeds=unconds,
+        width=image_width,
+        height=image_height,
+        num_inference_steps=int(round(steps / highres_denoise)),
+        num_images_per_prompt=num_samples,
+        generator=rng,
+        output_type='latent',
+        guidance_scale=cfg,
+        cross_attention_kwargs={'concat_conds': concat_conds},
+    ).images.to(vae.dtype) / vae.config.scaling_factor
+
+    pixels = vae.decode(latents).sample
+    pixels = pytorch2numpy(pixels)
+    return pixels, mask, fg
 
 
 @torch.inference_mode()
