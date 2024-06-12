@@ -236,7 +236,6 @@ def process(input_fg, input_bg, mask, prompt, i_width, i_height, num_samples, se
     mask = utils.cv2_resize_img_aspect(mask)
     image_width, image_height = fg.shape[:2]
     bg = utils.cv2_resize_img(input_bg, image_width, image_height)
-    print(fg.shape, bg.shape)
     
     bg_source = BGSource(bg_source)
     if bg_source == BGSource.UPLOAD:
@@ -333,10 +332,10 @@ def process(input_fg, input_bg, mask, prompt, i_width, i_height, num_samples, se
 def process_relight(input_fg, input_bg, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, 
                     cfg, highres_scale, highres_denoise, bg_source):
     input_fg, mask = run_rmbg(input_fg) # H, W
-    
     results, fg, mask, bg = process(input_fg, input_bg, mask, prompt, image_width, image_height, num_samples, seed, steps, a_prompt, n_prompt, 
                     cfg, highres_scale, highres_denoise, bg_source)
     results = [(x * 255.0).clip(0, 255).astype(np.uint8) for x in results]
+    mask = mask[...,np.newaxis].repeat(3, axis=2)
     blend_results = utils.blend_ic_light_bg(mask, fg, bg, results, threshold=0.4)
     return blend_results
 
