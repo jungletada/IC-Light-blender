@@ -354,15 +354,15 @@ if __name__ == '__main__':
     input_bg = utils.cv2_load_rgb(osp.join(path, 'bg-cyberpunk-neon-2.png')) # 背景图片
     prompt = 'beautiful woman, cinematic lighting' # 基本prompt
     num_samples = 2 # 生成图片数量
-    seed = 13233 # 随机种子
-    steps = 20 # 去噪步数
+    seed = 13233    # 随机种子
+    steps = 20      # 去噪步数
     a_prompt = 'best quality' # 正面prompt
     n_prompt = 'lowres, bad anatomy, bad hands, cropped, worst quality' # 负面prompt
-    cfg = 7.0 # classfier guidance
-    highres_scale = 1.0 # 放到倍数
-    highres_denoise = 0.5 #放大图片去噪强度
+    cfg = 7.0       # classfier guidance
+    highres_scale = 1.0     # 放到倍数
+    highres_denoise = 0.5   # 放大图片去噪强度
     bg_source = BGSource.UPLOAD # 参考背景图像光照
-    blend_threshold = 0.9 # 前景光照混合权重
+    blend_threshold = 1.0   # 前景光照混合权重
 
     result_gallery = process_relight(
         input_fg=input_fg,
