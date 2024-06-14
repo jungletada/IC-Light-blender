@@ -20,6 +20,8 @@ import utils
 from utils import pytorch2numpy, numpy2pytorch
 
 
+# 'stablediffusionapi/realistic-vision-v51'
+# 'runwayml/stable-diffusion-v1-5'
 sd15_name = 'stablediffusionapi/realistic-vision-v51'
 tokenizer = CLIPTokenizer.from_pretrained(sd15_name, subfolder="tokenizer")
 text_encoder = CLIPTextModel.from_pretrained(sd15_name, subfolder="text_encoder")
@@ -29,7 +31,7 @@ rmbg = BriaRMBG.from_pretrained("briaai/RMBG-1.4")
 
 # Change UNet
 with torch.no_grad():
-    new_conv_in = torch.nn.Conv2d(8, unet.conv_in.out_channels, unet.conv_in.kernel_size, unet.conv_in.stride, unet.conv_in.padding)
+    new_conv_in = torch.nn.Conv2d(12, unet.conv_in.out_channels, unet.conv_in.kernel_size, unet.conv_in.stride, unet.conv_in.padding)
     new_conv_in.weight.zero_()
     new_conv_in.weight[:, :4, :, :].copy_(unet.conv_in.weight)
     new_conv_in.bias = unet.conv_in.bias
@@ -49,11 +51,10 @@ def hooked_unet_forward(sample, timestep, encoder_hidden_states, **kwargs):
 unet.forward = hooked_unet_forward
 
 # Load
-model_path = './models/iclight_sd15_fc.safetensors'
+model_path = './models/iclight_sd15_fbc.safetensors'
 
 if not os.path.exists(model_path):
-    download_url_to_file(url='https://huggingface.co/lllyasviel/ic-light/blob/main/iclight_sd15_fc.safetensors', dst=model_path)
-
+    download_url_to_file(url='https://huggingface.co/lllyasviel/ic-light/resolve/main/iclight_sd15_fbc.safetensors', dst=model_path)
 
 sd_offset = sf.load_file(model_path)
 sd_origin = unet.state_dict()
@@ -185,82 +186,69 @@ def run_rmbg(img, sigma=0.0):
 
 
 @torch.inference_mode()
-def process(input_fg, mask, prompt, num_samples, seed, steps, a_prompt, n_prompt, 
-            cfg, highres_scale, highres_denoise, lowres_denoise, bg_source):
+def process(input_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt, n_prompt, 
+            cfg, highres_scale, highres_denoise, bg_source):
     fg = utils.cv2_resize_img_aspect(input_fg)
     mask = utils.cv2_resize_img_aspect(mask)
     image_width, image_height = fg.shape[:2]
+    bg = utils.cv2_resize_img(input_bg, image_width, image_height)
     
     bg_source = BGSource(bg_source)
-    input_bg = None
-    if bg_source == BGSource.NONE:
+    if bg_source == BGSource.UPLOAD:
         pass
+    elif bg_source == BGSource.UPLOAD_FLIP:
+        input_bg = np.fliplr(input_bg)
+    elif bg_source == BGSource.GREY:
+        input_bg = np.zeros(shape=(image_height, image_width, 3), dtype=np.uint8) + 64
     elif bg_source == BGSource.LEFT:
-        gradient = np.linspace(255, 0, image_width)
+        gradient = np.linspace(224, 32, image_width)
         image = np.tile(gradient, (image_height, 1))
         input_bg = np.stack((image,) * 3, axis=-1).astype(np.uint8)
     elif bg_source == BGSource.RIGHT:
-        gradient = np.linspace(0, 255, image_width)
+        gradient = np.linspace(32, 224, image_width)
         image = np.tile(gradient, (image_height, 1))
         input_bg = np.stack((image,) * 3, axis=-1).astype(np.uint8)
     elif bg_source == BGSource.TOP:
-        gradient = np.linspace(255, 0, image_height)[:, None]
+        gradient = np.linspace(224, 32, image_height)[:, None]
         image = np.tile(gradient, (1, image_width))
         input_bg = np.stack((image,) * 3, axis=-1).astype(np.uint8)
     elif bg_source == BGSource.BOTTOM:
-        gradient = np.linspace(0, 255, image_height)[:, None]
+        gradient = np.linspace(32, 224, image_height)[:, None]
         image = np.tile(gradient, (1, image_width))
         input_bg = np.stack((image,) * 3, axis=-1).astype(np.uint8)
     else:
-        raise 'Wrong initial latent!'
+        raise 'Wrong background source!'
 
-    rng = torch.Generator(device=device).manual_seed(int(seed))
-    concat_conds = numpy2pytorch([fg]).to(device=vae.device, dtype=vae.dtype)
+    rng = torch.Generator(device=device).manual_seed(seed)
+
+    # concat foreground and background
+    concat_conds = numpy2pytorch([fg, bg]).to(device=vae.device, dtype=vae.dtype)
     concat_conds = vae.encode(concat_conds).latent_dist.mode() * vae.config.scaling_factor
+    concat_conds = torch.cat([c[None, ...] for c in concat_conds], dim=1)
 
     conds, unconds = encode_prompt_pair(
         positive_prompt=prompt + ', ' + a_prompt, 
         negative_prompt=n_prompt)
 
-    if input_bg is None:
-        latents = t2i_pipe(
-            prompt_embeds=conds,
-            negative_prompt_embeds=unconds,
-            width=image_width,
-            height=image_height,
-            num_inference_steps=steps,
-            num_images_per_prompt=num_samples,
-            generator=rng,
-            output_type='latent',
-            guidance_scale=cfg,
-            cross_attention_kwargs={'concat_conds': concat_conds},
-        ).images.to(vae.dtype) / vae.config.scaling_factor
-        
-    else:
-        bg = utils.cv2_resize_img(input_bg, image_width, image_height)
-        bg_latent = numpy2pytorch([bg]).to(device=vae.device, dtype=vae.dtype)
-        bg_latent = vae.encode(bg_latent).latent_dist.mode() * vae.config.scaling_factor
-        latents = i2i_pipe(
-            image=bg_latent,
-            strength=lowres_denoise,
-            prompt_embeds=conds,
-            negative_prompt_embeds=unconds,
-            width=image_width,
-            height=image_height,
-            num_inference_steps=int(round(steps / lowres_denoise)),
-            num_images_per_prompt=num_samples,
-            generator=rng,
-            output_type='latent',
-            guidance_scale=cfg,
-            cross_attention_kwargs={'concat_conds': concat_conds},
-        ).images.to(vae.dtype) / vae.config.scaling_factor
-    
+    latents = t2i_pipe(
+        prompt_embeds=conds,
+        negative_prompt_embeds=unconds,
+        width=image_width,
+        height=image_height,
+        num_inference_steps=steps,
+        num_images_per_prompt=num_samples,
+        generator=rng,
+        output_type='latent',
+        guidance_scale=cfg,
+        cross_attention_kwargs={'concat_conds': concat_conds},
+    ).images.to(vae.dtype) / vae.config.scaling_factor
+
     pixels = vae.decode(latents).sample
     pixels = pytorch2numpy(pixels)
     pixels = [utils.cv2_resize_img(
-        img=p,
-        new_w=int(round(image_width * highres_scale / 64.0) * 64),
-        new_h=int(round(image_height * highres_scale / 64.0) * 64))
+        p,
+        int(round(image_width * highres_scale / 64.0) * 64),
+        int(round(image_height * highres_scale / 64.0) * 64))
     for p in pixels]
 
     pixels = numpy2pytorch(pixels).to(device=vae.device, dtype=vae.dtype)
@@ -268,12 +256,15 @@ def process(input_fg, mask, prompt, num_samples, seed, steps, a_prompt, n_prompt
     latents = latents.to(device=unet.device, dtype=unet.dtype)
 
     image_height, image_width = latents.shape[2] * 8, latents.shape[3] * 8
+        
     fg = utils.cv2_resize_img(fg, image_width, image_height)
+    bg = utils.cv2_resize_img(bg, image_width, image_height)
     mask = utils.cv2_resize_img(mask, image_width, image_height)
 
-    concat_conds = numpy2pytorch([fg]).to(device=vae.device, dtype=vae.dtype)
+    concat_conds = numpy2pytorch([fg, bg]).to(device=vae.device, dtype=vae.dtype)
     concat_conds = vae.encode(concat_conds).latent_dist.mode() * vae.config.scaling_factor
-    
+    concat_conds = torch.cat([c[None, ...] for c in concat_conds], dim=1)
+
     latents = i2i_pipe(
         image=latents,
         strength=highres_denoise,
@@ -292,7 +283,7 @@ def process(input_fg, mask, prompt, num_samples, seed, steps, a_prompt, n_prompt
     pixels = vae.decode(latents).sample
     pixels = pytorch2numpy(pixels, quant=False)
 
-    return pixels, fg, mask
+    return pixels, fg, bg, mask
 
 
 @torch.inference_mode()
@@ -312,41 +303,33 @@ def process_relight(input_fg, input_bg, prompt, num_samples, seed, steps, a_prom
 
 
 quick_prompts = [
-    'indoor',
-    'outdoor',
-    'sunshine from window',
-    'neon light, city',
-    'sunset over sea',
-    'golden time',
-    'sci-fi RGB glowing, cyberpunk',
-    'natural lighting',
-    'warm atmosphere, at home, bedroom',
-    'magic lit',
-    'evil, gothic, Yharnam',
-    'light and shadow',
-    'shadow from window',
-    'soft studio lighting',
-    'home atmosphere, cozy bedroom illumination',
-    'neon, Wong Kar-wai, warm'
+    'beautiful woman',
+    'handsome man',
+    'beautiful woman, cinematic lighting',
+    'handsome man, cinematic lighting',
+    'beautiful woman, natural lighting',
+    'handsome man, natural lighting',
+    'beautiful woman, neo punk lighting, cyberpunk',
+    'handsome man, neo punk lighting, cyberpunk',
 ]
+quick_prompts = [[x] for x in quick_prompts]
 
-quick_subjects = [
-    'beautiful woman, detailed face',
-    'handsome man, detailed face',
-]
 
 class BGSource(Enum):
-    NONE = "None"
+    UPLOAD = "Use Background Image"
+    UPLOAD_FLIP = "Use Flipped Background Image"
     LEFT = "Left Light"
     RIGHT = "Right Light"
     TOP = "Top Light"
     BOTTOM = "Bottom Light"
+    GREY = "Ambient"
 
 
 if __name__ == '__main__':
     path = 'results'
     input_fg = utils.cv2_load_rgb(osp.join(path, 'lady-photo-3.jpeg')) # 前景图片
-    prompt = 'natural lighting' # 基本prompt
+    input_bg = utils.cv2_load_rgb(osp.join(path, 'bg-cyberpunk-neon-2.png')) # 背景图片
+    prompt = 'beautiful woman, cinematic lighting' # 基本prompt
     num_samples = 2 # 生成图片数量
     seed = 13233    # 随机种子
     steps = 20      # 去噪步数
@@ -355,19 +338,16 @@ if __name__ == '__main__':
     cfg = 7.0       # classfier guidance
     highres_scale = 1.0     # 放到倍数
     highres_denoise = 0.5   # 放大图片去噪强度
-    lowres_denoise = 0.9    # 
-    bg_source = BGSource.LEFT # 参考背景图像光照
-    blend_threshold = 0.15   # 前景光照混合权重阈值
+    bg_source = BGSource.UPLOAD # 参考背景图像光照
+    blend_threshold = 1.0   # 前景光照混合权重阈值
 
     # 1 显著性分割, 这一步可以替换为SAM分割
     input_fg, mask = run_rmbg(img=input_fg)
-    # 1.1 考虑采用开运算或者腐蚀操作处理mask
-    # mask = utils.cv2_morphologyEx(mask, kernel_size=(5, 5))
-    mask = utils.cv2_erode_image(mask, kernel_size=(1, 1))
     
     # 2 图像生成
-    results, output_fg, mask = process(
+    results, output_fg, output_bg, mask = process(
         input_fg=input_fg,
+        input_bg=input_bg,
         mask=mask,
         prompt=prompt,
         num_samples=num_samples,
@@ -378,21 +358,22 @@ if __name__ == '__main__':
         cfg=cfg,
         highres_scale=highres_scale,
         highres_denoise=highres_denoise,
-        lowres_denoise=lowres_denoise,
         bg_source=bg_source)
     
-    # 2.1 保证输出的取值在(0, 255)
+    # 保证输出的取值在(0, 255)
     results = [(x * 255.0).clip(0, 255).astype(np.uint8) for x in results]
-    # 2.2 mask广播为三通道方便乘法
+    # mask广播为三通道方便乘法
     mask = mask[...,np.newaxis].repeat(3, axis=2)
     
     # 3 生成图像与原图像的加权求和
-    result_gallery = utils.blend_ic_light(
-        resized_fg=output_fg,  
+    result_gallery = utils.blend_ic_light_bg(
+        resized_fg=output_fg, 
+        resized_bg=output_bg, 
         resized_mask=mask,
         ic_results=results, 
-        blend_value=blend_threshold)
+        blend_value_fg=0.9, 
+        blend_value_bg=0.5)
 
     for i, ic_res in enumerate(result_gallery):
         print(f'saving image {i}...')
-        utils.cv2_save_rgb(osp.join(path, f'lady-photo-3-ic-b{i}.jpeg'), ic_res)
+        utils.cv2_save_rgb(osp.join(path, f'lady-photo-3-ic-{i}.jpeg'), ic_res)

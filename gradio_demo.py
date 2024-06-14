@@ -73,7 +73,6 @@ unet.set_attn_processor(AttnProcessor2_0())
 vae.set_attn_processor(AttnProcessor2_0())
 
 # Samplers
-
 ddim_scheduler = DDIMScheduler(
     num_train_timesteps=1000,
     beta_start=0.00085,
@@ -222,7 +221,6 @@ def process(input_fg, mask, prompt, num_samples, seed, steps,
             a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source):
     fg = utils.cv2_resize_img_aspect(input_fg)
     mask = utils.cv2_resize_img_aspect(mask)
-    fg = input_fg
     image_height, image_width = fg.shape[:2]
     
     bg_source = BGSource(bg_source)
@@ -329,7 +327,7 @@ def process(input_fg, mask, prompt, num_samples, seed, steps,
 @torch.inference_mode()
 def process_relight(input_fg, prompt, num_samples, seed, steps, 
                     a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source, 
-                    blend_value, erode_beta):
+                    blend_value):
     # mask = utils.cv2_erode_image(mask, beta=erode_beta)
     fuse_fg, mask = run_rmbg(input_fg) # H, W
     mask = mask.repeat(3, axis=2)
@@ -428,7 +426,7 @@ with block:
     #         run_on_click=True, examples_per_page=1024
     #     )
     ips = [input_fg, prompt, num_samples, seed, steps, 
-           a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source, blend_value, erode_beta]
+           a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source, blend_value]
     relight_button.click(fn=process_relight, inputs=ips, outputs=[mask, result_gallery])
     example_quick_prompts.click(lambda x, y: ', '.join(y.split(', ')[:2] + [x[0]]), inputs=[example_quick_prompts, prompt], 
                                 outputs=prompt, show_progress=False, queue=False)

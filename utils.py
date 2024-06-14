@@ -92,9 +92,9 @@ def cv2_resize_img(img, new_h, new_w):
     return img
     
     
-def cv2_erode_image(mask, beta=2):
+def cv2_erode_image(mask, kernel_size=(3, 3)):
     C = mask.shape[-1]
-    kernel = np.ones((beta, beta), np.uint8) # 创建腐蚀操作的核，大小为 (beta, beta)
+    kernel = np.ones(kernel_size, np.uint8) # 创建腐蚀操作的核，大小为 (beta, beta)
     if C == 3:
         gray_mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
         eroded_gray_mask = cv2.erode(gray_mask, kernel, iterations=1)
@@ -102,6 +102,12 @@ def cv2_erode_image(mask, beta=2):
     else:
         eroded_mask = cv2.erode(mask, kernel, iterations=1) # 进行腐蚀操作
     return eroded_mask
+
+
+def cv2_morphologyEx(mask, kernel_size=(3, 3)):
+    kernel = np.ones(kernel_size, np.uint8)
+    opened_mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    return opened_mask
 
 
 def mask_to_binary(mask, rgb_dim=True):
@@ -114,40 +120,53 @@ def mask_to_binary(mask, rgb_dim=True):
     return binary_array
         
 
-def blend_ic_light(mask, resized_fg, ic_results, blend_value=0.4):
+def blend_ic_light(resized_mask, resized_fg, ic_results, blend_value=None):
     blended_ic_results = []
-    for i, ic_res in enumerate(ic_results):
-        diff = ((ic_res - resized_fg) * mask).astype(np.uint8)
-        min_diff, max_diff = np.min(diff, axis=(0,1)), np.max(diff, axis=(0,1))
-        weight_ic_fg = (diff - min_diff) / (max_diff - min_diff + 1e-6)
-        weight_ic_fg[weight_ic_fg > blend_value] = blend_value
-        weight_fg = 1 - weight_ic_fg
-        
-        blended = (ic_res * weight_ic_fg + resized_fg * weight_fg).astype(np.uint8)
-        ic_res[mask==1] = blended[mask==1]
-        blended_ic_results.append(ic_res)
+    if blend_value is not None:
+        for i, ic_res in enumerate(ic_results):
+            diff = ((ic_res - resized_fg) * resized_mask).astype(np.uint8)
+            min_diff, max_diff = np.min(diff, axis=(0,1)), np.max(diff, axis=(0,1))
+            weight_ic_fg = (diff - min_diff) / (max_diff - min_diff + 1e-6)
+            weight_ic_fg[weight_ic_fg > blend_value] = blend_value
+            weight_fg = 1 - weight_ic_fg
+            
+            blended = (ic_res * weight_ic_fg + resized_fg * weight_fg).astype(np.uint8)
+            ic_res[resized_mask==1] = blended[resized_mask==1]
+            blended_ic_results.append(ic_res)
+    else:
+        return ic_results
         
     return blended_ic_results
 
 
-def blend_ic_light_bg(mask, resized_fg, resized_bg, ic_results, blend_value_fg=0.9, blend_value_bg=0.4):
+def blend_ic_light_bg(resized_fg, resized_bg, resized_mask, ic_results, blend_value_fg=None, blend_value_bg=None):
     blended_ic_results = []
-    for i, ic_res in enumerate(ic_results):
-        diff = ((ic_res - resized_fg) * mask).astype(np.uint8)
-        min_diff, max_diff = np.min(diff, axis=(0,1)), np.max(diff, axis=(0,1))
-        weight_ic_fg = (diff - min_diff) / (max_diff - min_diff + 1e-6)
-        weight_ic_fg[weight_ic_fg > blend_value_fg] = blend_value_fg
-        weight_fg = 1 - weight_ic_fg
+    
+    if blend_value_fg is None and blend_value_bg is None:
+        return ic_results
+    
+    for i, ic_res in enumerate(ic_results):    
+        if blend_value_fg is not None:
+            diff = ((ic_res - resized_fg) * resized_mask).astype(np.uint8)
+            min_diff, max_diff = np.min(diff, axis=(0,1)), np.max(diff, axis=(0,1))
+            weight_ic_fg = (diff - min_diff) / (max_diff - min_diff + 1e-6)
+            weight_ic_fg[weight_ic_fg > blend_value_fg] = blend_value_fg
+            weight_fg = 1 - weight_ic_fg
+            blended_fg = (ic_res * weight_ic_fg + resized_fg * weight_fg).astype(np.uint8) 
+        else:
+            blended_fg = ic_res
         
-        diff = ((ic_res - resized_bg) * (1 - mask)).astype(np.uint8)
-        min_diff, max_diff = np.min(diff, axis=(0,1)), np.max(diff, axis=(0,1))
-        weight_ic_bg = (diff - min_diff) / (max_diff - min_diff + 1e-6)
-        weight_ic_bg[weight_ic_bg > blend_value_bg] = blend_value_bg
-        weight_bg = 1 - weight_ic_bg
-
-        blended_fg = (ic_res * weight_ic_fg + resized_fg * weight_fg).astype(np.uint8)
-        blended_bg = (ic_res * weight_ic_bg + resized_bg * weight_bg).astype(np.uint8)
-        ic_res = blended_fg * mask + blended_bg * (1 - mask)
+        if blend_value_bg is not None:
+            diff = ((ic_res - resized_bg) * (1 - resized_mask)).astype(np.uint8)
+            min_diff, max_diff = np.min(diff, axis=(0,1)), np.max(diff, axis=(0,1))
+            weight_ic_bg = (diff - min_diff) / (max_diff - min_diff + 1e-6)
+            weight_ic_bg[weight_ic_bg > blend_value_bg] = blend_value_bg
+            weight_bg = 1 - weight_ic_bg
+            blended_bg = (ic_res * weight_ic_bg + resized_bg * weight_bg).astype(np.uint8)
+        else: 
+            blended_bg = ic_res
+        
+        ic_res = blended_fg * resized_mask + blended_bg * (1 - resized_mask)
         blended_ic_results.append(ic_res.astype(np.uint8))
 
     return blended_ic_results
