@@ -9,7 +9,7 @@ import PIL.Image as Image
 def pytorch2numpy(imgs, quant=True):
     results = []
     for x in imgs:
-        y = x.movedim(0, -1)
+        y = x.movedim(0, -1) # (b, c, h, w) -> (b, h, w, c) 
         if quant:
             y = y * 127.5 + 127.5
             y = y.detach().float().cpu().numpy().clip(0, 255).astype(np.uint8)
@@ -24,7 +24,7 @@ def pytorch2numpy(imgs, quant=True):
 @torch.inference_mode()
 def numpy2pytorch(imgs):
     h = torch.from_numpy(np.stack(imgs, axis=0)).float() / 127.0 - 1.0  # so that 127 must be strictly 0.0
-    h = h.movedim(-1, 1)
+    h = h.movedim(-1, 1) # (b, h, w, c) -> (b, c, h, w)
     return h
 
 
