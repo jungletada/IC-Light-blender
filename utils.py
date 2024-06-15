@@ -88,7 +88,7 @@ def cv2_resize_and_crop_bg(image, new_h, new_w):
 
 
 def cv2_resize_img(img, new_h, new_w):
-    img = cv2.resize(img, (new_h, new_w), interpolation=cv2.INTER_AREA)
+    img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
     return img
     
     
