@@ -111,12 +111,11 @@ def cv2_morphologyEx(mask, kernel_size=(3, 3)):
 
 
 def mask_to_binary(mask, rgb_dim=True):
-    gray_mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
-    _, binary_image = cv2.threshold(gray_mask, 200, 1, cv2.THRESH_BINARY)
+    gray_mask = cv2.cvtColor(mask, cv2.COLOR_RGB2GRAY)
+    _, binary_image = cv2.threshold(gray_mask, 127, 1, cv2.THRESH_BINARY)
     binary_array = binary_image[...,np.newaxis].astype(np.uint8)
     if rgb_dim:
         binary_array = binary_array.repeat(3, axis=2)
-        
     return binary_array
         
 

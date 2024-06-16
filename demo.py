@@ -181,6 +181,12 @@ def run_rmbg(img, sigma=0.0):
     return result.clip(0, 255).astype(np.uint8), alpha
 
 
+def run_process_alpha(img, mask, sigma=0.0):
+    result = 127 + (img.astype(np.float32) - 127 + sigma) * mask
+    result = result.clip(0, 255).astype(np.uint8) # result背景部分变成灰色
+    return result
+
+
 @torch.inference_mode()
 def process(input_fg, mask, prompt, num_samples, seed, steps, a_prompt, n_prompt, 
             cfg, highres_scale, highres_denoise, lowres_denoise, bg_source):
@@ -301,22 +307,6 @@ def process(input_fg, mask, prompt, num_samples, seed, steps, a_prompt, n_prompt
     return pixels, fg, mask
 
 
-@torch.inference_mode()
-def process_relight(input_fg, input_bg, prompt, num_samples, seed, steps, a_prompt, n_prompt, 
-                    cfg, highres_scale, highres_denoise, bg_source, blend_threshold):
-    input_fg, mask = run_rmbg(input_fg)
-    results, fg, mask, bg = process(
-        input_fg, input_bg, mask, prompt, num_samples, seed, steps, a_prompt, n_prompt, 
-        cfg, highres_scale, highres_denoise, bg_source)
-    results = [(x * 255.0).clip(0, 255).astype(np.uint8) for x in results]
-    
-    mask = mask[...,np.newaxis].repeat(3, axis=2)
-    results = utils.blend_ic_light_bg(
-        mask, fg, bg, results, threshold=blend_threshold)
-    
-    return results
-
-
 quick_prompts = [
     'indoor',
     'outdoor',
@@ -351,27 +341,34 @@ class BGSource(Enum):
 
 if __name__ == '__main__':
     path = 'results'
-    input_fg = utils.cv2_load_rgb(osp.join(path, 'lady-photo-4.jpeg')) # 前景图片
-    prompt = 'warm atmosphere, at home, bedroom' # 基本prompt
-    num_samples = 2 # 生成图片数量
-    seed = 13233    # 随机种子
+    input_fg = utils.cv2_load_rgb(osp.join(path, 'cupr_canvas.png')) # 前景图片
+    prompt = 'shadow, warm atmosphere' # 基本prompt
+    num_samples = 4 # 生成图片数量
+    seed = 3233    # 随机种子
     steps = 20      # 去噪步数
     a_prompt = 'best quality' # 正面prompt
-    n_prompt = 'lowres, bad anatomy, bad hands, cropped, worst quality' # 负面prompt
+    n_prompt = 'lowres, bad anatomy, worst quality' # 负面prompt
     cfg = 7.0       # classfier guidance
     highres_scale = 1.0     # 放大倍数
     highres_denoise = 0.5   # 第一阶段去噪强度
     lowres_denoise = 0.9    # 第二阶段去噪强度
     bg_source = BGSource.NONE  # 参考背景图像光照
-    blend_threshold = 0.20     # 前景光照混合权重阈值
+    blend_threshold = 0.2     # 前景光照混合权重阈值
 
     # 1 显著性分割, 这一步可以替换为SAM分割
     # 需要限制图片大小，图片>1024则分割效果会显著降低
-    input_fg = utils.cv2_resize_img_aspect(input_fg) 
-    input_fg, mask = run_rmbg(img=input_fg)
+    # ------------- 模型分割 ------------- #
+    # input_fg = utils.cv2_resize_img_aspect(input_fg) 
+    # input_fg, mask = run_rmbg(img=input_fg)
+    
+    # ------------- 或者读取图片mask ------------- #
+    mask = utils.cv2_load_rgb(osp.join(path, 'cupr_mask.png'))
+    mask = utils.mask_to_binary(mask, rgb_dim=False)
+    input_fg = run_process_alpha(input_fg, mask)
+    
     # 1.1 考虑采用开运算或者腐蚀操作处理mask
-    mask = utils.cv2_morphologyEx(mask, kernel_size=(4, 4))
-    # mask = utils.cv2_erode_image(mask, kernel_size=(1, 1))
+    # mask = utils.cv2_morphologyEx(mask, kernel_size=(3, 3))
+    mask = utils.cv2_erode_image(mask, kernel_size=(2, 2))
     
     # 2 图像生成
     results, output_fg, mask = process(
@@ -393,9 +390,7 @@ if __name__ == '__main__':
     results = [(x * 255.0).clip(0, 255).astype(np.uint8) for x in results]
     # 2.2 mask广播为三通道方便乘法
     mask = mask[...,np.newaxis].repeat(3, axis=2)
-    for i, ic_res in enumerate(results):
-        print(f'saving image {i}...')
-        utils.cv2_save_rgb(osp.join(path, f'lady-photo-4-ic-{i}.png'), ic_res)
+    
     # 3 生成图像与原图像的加权求和
     result_gallery = utils.blend_ic_light(
         resized_fg=output_fg,  
@@ -405,4 +400,4 @@ if __name__ == '__main__':
 
     for i, ic_res in enumerate(result_gallery):
         print(f'saving image {i}...')
-        utils.cv2_save_rgb(osp.join(path, f'lady-photo-4-ib{i}.png'), ic_res)
+        utils.cv2_save_rgb(osp.join(path, f'cupr-ib{i}.png'), ic_res)
