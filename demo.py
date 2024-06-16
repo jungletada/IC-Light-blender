@@ -342,7 +342,7 @@ class BGSource(Enum):
 if __name__ == '__main__':
     path = 'results'
     input_fg = utils.cv2_load_rgb(osp.join(path, 'cupr_canvas.png')) # 前景图片
-    prompt = 'shadow, warm atmosphere' # 基本prompt
+    prompt = 'shadow,cool style,wall background' # 基本prompt
     num_samples = 4 # 生成图片数量
     seed = 3233    # 随机种子
     steps = 20      # 去噪步数
