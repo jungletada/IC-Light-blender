@@ -1,6 +1,8 @@
 import os
 import cv2
 import math
+import utils
+
 import gradio as gr
 import numpy as np
 import os.path as osp
@@ -17,7 +19,12 @@ from briarmbg import BriaRMBG
 from enum import Enum
 from torch.hub import download_url_to_file
 from utils import numpy2pytorch, pytorch2numpy
-import utils
+import skimage.transform
+from scipy.ndimage import uniform_filter
+
+from rtv_smooth import rtv_smooth, tv_smooth
+from utils import do_imgs, read_img, write_img, merge_image
+from color_simplify import convert_img
 
 
 sd15_name = 'stablediffusionapi/realistic-vision-v51'
@@ -217,10 +224,9 @@ def run_process_alpha(img, mask, sigma=0.0):
 
 
 @torch.inference_mode()
-def process(input_fg, mask, prompt, num_samples, seed, steps, 
+def process(fg, mask, prompt, num_samples, seed, steps, 
             a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source):
-    fg = utils.cv2_resize_img_aspect(input_fg)
-    mask = utils.cv2_resize_img_aspect(mask)
+    
     image_height, image_width = fg.shape[:2]
     
     bg_source = BGSource(bg_source)
@@ -266,7 +272,6 @@ def process(input_fg, mask, prompt, num_samples, seed, steps,
             cross_attention_kwargs={'concat_conds': concat_conds},
         ).images.to(vae.dtype) / vae.config.scaling_factor
     else:
-        # bg = resize_and_center_crop(input_bg, image_width, image_height)
         bg = utils.cv2_resize_img(input_bg, image_width, image_height)
         bg_latent = numpy2pytorch([bg]).to(device=vae.device, dtype=vae.dtype)
         bg_latent = vae.encode(bg_latent).latent_dist.mode() * vae.config.scaling_factor
@@ -321,24 +326,45 @@ def process(input_fg, mask, prompt, num_samples, seed, steps,
 
     pixels = vae.decode(latents).sample
 
-    return pytorch2numpy(pixels), mask, fg
+    return pytorch2numpy(pixels)
 
 
 @torch.inference_mode()
 def process_relight(input_fg, prompt, num_samples, seed, steps, 
-                    a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source, 
-                    blend_value):
-    # mask = utils.cv2_erode_image(mask, beta=erode_beta)
+                    a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source, blend_value):
+    file_name = 'test'
+    fg = utils.cv2_resize_img_aspect(input_fg)
+    utils.cv2_save_rgb(osp.join("results", f"{file_name}.png"), fg)
+    
+    do_imgs(
+        fun=convert_img,
+        model_filenames=None,
+        in_patterns=[osp.join("results", f"{file_name}.png")],
+        out_suffix="_simplify",
+        out_extname=".png")
+    
+    low_freq = utils.cv2_load_rgb(osp.join("results", f"{file_name}_simplify_out_0.png"))
     fuse_fg, mask = run_rmbg(input_fg) # H, W
-    mask = mask.repeat(3, axis=2)
-    results, mask, fg = process(
-        fuse_fg, mask, prompt, num_samples, seed, steps, 
-            a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source)
-    mask = mask.astype(np.uint8)
-    utils.cv2_save_rgb(osp.join('results','mask.png'), (mask * 255).astype(np.uint8)) 
-    blend_results = utils.blend_ic_light(mask, fg, results, blend_value=blend_value)
-    utils.cv2_save_rgb(osp.join('results','fuse_fg.jpg'), fuse_fg)
-    return fuse_fg, blend_results
+    mask = utils.cv2_resize_img_aspect(mask)
+
+    results = process(
+        low_freq, mask, prompt, num_samples, seed, steps, 
+        a_prompt, n_prompt, cfg, highres_scale, highres_denoise, lowres_denoise, bg_source)
+
+    merge_results = []
+    
+    for i, out_res in enumerate(results):
+        utils.cv2_save_rgb(osp.join('results',f'test_res_{i}.png'), out_res) 
+        merge_image(
+            in_filename_1=osp.join("results", f"{file_name}.png"),
+            in_filename_2=osp.join("results", f"{file_name}_simplify_out_0.png"),
+            in_filename_3=osp.join("results", f'{file_name}_res_{i}.png'),
+            out_filename=osp.join("results", f'{file_name}_res_merge_{i}.png'),
+        )
+        merge_res = utils.cv2_load_rgb(osp.join("results", f'{file_name}_res_merge_{i}.png'))
+        merge_results.append(merge_res)
+        
+    return fuse_fg, merge_results
 
 
 quick_prompts = [
