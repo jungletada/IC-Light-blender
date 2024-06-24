@@ -41,7 +41,7 @@ def cv2_load_rgb(path):
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
-def cv2_resize_img_aspect(img, max_size=960, pad_to_64=True):
+def cv2_resize_img_aspect(img, max_size=1024, pad_to_64=True):
     h, w = img.shape[:2]
     if max(h, w) > max_size:
         if h > w:

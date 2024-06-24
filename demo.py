@@ -14,6 +14,8 @@ from briarmbg import BriaRMBG
 from enum import Enum
 from torch.hub import download_url_to_file
 import warnings
+from PIL import Image, ImageOps
+
 warnings.filterwarnings('ignore')
 
 import utils
@@ -190,11 +192,9 @@ def run_process_alpha(img, mask, sigma=0.0):
 @torch.inference_mode()
 def process(input_fg, mask, prompt, num_samples, seed, steps, a_prompt, n_prompt, 
             cfg, highres_scale, highres_denoise, lowres_denoise, bg_source):
-    print(input_fg.shape)
     fg = utils.cv2_resize_img_aspect(input_fg) # H, W -> 限制大小
     mask = utils.cv2_resize_img_aspect(mask)
     image_height, image_width = fg.shape[:2]
-    print(fg.shape)
     
     bg_source = BGSource(bg_source)
     input_bg = None
@@ -341,10 +341,15 @@ class BGSource(Enum):
 
 if __name__ == '__main__':
     path = 'results'
-    input_fg = utils.cv2_load_rgb(osp.join(path, 'cupr_canvas.png')) # 前景图片
-    prompt = 'shadow,cool style,wall background' # 基本prompt
+    img_name = 'model1'
+    postfix = '.png'
+    
+    # input_fg = utils.cv2_load_rgb(osp.join(path, 'base_imgs', img_name+postfix)) # 前景图片
+    input_fg = utils.cv2_load_rgb(osp.join(path, 'base_imgs', img_name+postfix)) # 前景图片
+    prompt = 'handsome man, detailed face, at home, fashion background' # 基本prompt
+    # prompt = 'soft light, night, street' # 基本prompt
     num_samples = 4 # 生成图片数量
-    seed = 3233    # 随机种子
+    seed = 4233    # 随机种子
     steps = 20      # 去噪步数
     a_prompt = 'best quality' # 正面prompt
     n_prompt = 'lowres, bad anatomy, worst quality' # 负面prompt
@@ -353,7 +358,7 @@ if __name__ == '__main__':
     highres_denoise = 0.5   # 第一阶段去噪强度
     lowres_denoise = 0.9    # 第二阶段去噪强度
     bg_source = BGSource.NONE  # 参考背景图像光照
-    blend_threshold = 0.2     # 前景光照混合权重阈值
+    blend_threshold = 0.75     # 前景光照混合权重阈值
 
     # 1 显著性分割, 这一步可以替换为SAM分割
     # 需要限制图片大小，图片>1024则分割效果会显著降低
@@ -362,13 +367,10 @@ if __name__ == '__main__':
     # input_fg, mask = run_rmbg(img=input_fg)
     
     # ------------- 或者读取图片mask ------------- #
-    mask = utils.cv2_load_rgb(osp.join(path, 'cupr_mask.png'))
+    # mask = utils.cv2_load_rgb(osp.join(path, 'base_imgs', 'model1_mask.png'))
+    mask = utils.cv2_load_rgb(osp.join(path, 'base_imgs', 'model1_mask.png'))
     mask = utils.mask_to_binary(mask, rgb_dim=False)
     input_fg = run_process_alpha(input_fg, mask)
-    
-    # 1.1 考虑采用开运算或者腐蚀操作处理mask
-    # mask = utils.cv2_morphologyEx(mask, kernel_size=(3, 3))
-    mask = utils.cv2_erode_image(mask, kernel_size=(2, 2))
     
     # 2 图像生成
     results, output_fg, mask = process(
@@ -388,16 +390,25 @@ if __name__ == '__main__':
         
     # 2.1 保证输出的取值在(0, 255)
     results = [(x * 255.0).clip(0, 255).astype(np.uint8) for x in results]
+    
+    for i, ic_res in enumerate(results):
+        print(f'saving image {i}...')
+        utils.cv2_save_rgb(osp.join(path, f'model1-mib{i}.png'), ic_res)
+        
+    # 考虑采用开运算或者腐蚀操作处理mask
+    # mask = utils.cv2_morphologyEx(mask, kernel_size=(20, 20))
+    # mask = utils.cv2_erode_image(mask, kernel_size=(1, 1))
+    
     # 2.2 mask广播为三通道方便乘法
     mask = mask[...,np.newaxis].repeat(3, axis=2)
     
     # 3 生成图像与原图像的加权求和
-    result_gallery = utils.blend_ic_light(
+    results = utils.blend_ic_light(
         resized_fg=output_fg,  
         resized_mask=mask,
         ic_results=results, 
         blend_value=blend_threshold)
 
-    for i, ic_res in enumerate(result_gallery):
+    for i, ic_res in enumerate(results):
         print(f'saving image {i}...')
-        utils.cv2_save_rgb(osp.join(path, f'cupr-ib{i}.png'), ic_res)
+        utils.cv2_save_rgb(osp.join(path, f'model1-ib{i}.png'), ic_res)
